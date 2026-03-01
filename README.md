@@ -1,175 +1,137 @@
 # crypto-stock-alert
 
-OpenClaw skill + CLI helper for monitoring **cryptocurrency** and **stock** prices, with threshold alerts and automatic periodic checks.
+OpenClaw skill + Python CLI for:
 
-This project is designed for prompts like:
+- Crypto and stock price lookup
+- Threshold alerts (`above` / `below`)
+- Scheduled checks via cron
+- Chart image generation (candlestick/line)
+- Technical indicators (SMA, EMA, MACD, RSI, Bollinger Bands, Fibonacci)
 
-- "Alert me when Bitcoin goes above 50,000 USD"
-- "Alert me when AAPL drops below 200"
+Typical requests this skill handles:
 
-It translates those intents into executable checks and notifications.
+- "Alert me when BTC is above 50,000"
+- "Show me AAPL candlestick chart with MACD + RSI"
+- "Generate a BTC 15m chart with Fibonacci levels"
 
 ## Features
 
-- Monitor both crypto and stocks from one script
-- Configure `above` and `below` threshold alerts
-- Run one-time checks or scheduled checks
-- Deliver notifications through `openclaw message send`
-- Built-in data-source fallback per asset class
-- Edge-triggered alerts to avoid message spam
-- File-lock protection to avoid duplicate triggers from concurrent runs
-- No third-party Python dependencies required
+- Unified workflow for crypto + stocks
+- Multi-source fallback for both quote and chart data
+- Edge-triggered alerts to avoid repeated spam
+- Lock protection for concurrent `check` executions
+- PNG chart output with indicator overlays
+- Optional delivery via `openclaw message send --media`
 
-## Repository Layout
+## Repository Structure
 
-- `SKILL.md`: OpenClaw skill metadata + workflow guidance
-- `scripts/market_alert.py`: Core CLI script
-- `openclaw_crypto_stock_alert_skill.md`: Extended design notes (Chinese)
+- `SKILL.md` - OpenClaw skill metadata and invocation guidance
+- `scripts/market_alert.py` - Main CLI
+- `openclaw_crypto_stock_alert_skill.md` - Design notes (Chinese)
 
 ## Requirements
 
 - Python 3.9+
-- OpenClaw CLI installed and available in `PATH`
-- Network access to market data providers
-- `crontab` available (for periodic checks)
+- OpenClaw CLI in `PATH`
+- `crontab` for periodic checks
+- Network access to market data APIs
 
-## Installation
-
-### Option A: Use as an OpenClaw workspace skill
-
-Place this repository at:
+For chart/report commands, install `matplotlib` in a virtualenv:
 
 ```bash
-~/.openclaw/workspace/skills/crypto-stock-alert
+python3 -m venv .venv
+. .venv/bin/activate
+pip install matplotlib
 ```
 
-Then verify:
-
-```bash
-openclaw skills info crypto-stock-alert
-```
-
-### Option B: Use as a standalone script
-
-Run directly from any directory:
-
-```bash
-python3 scripts/market_alert.py --help
-```
+Then run chart/report with `.venv/bin/python` or activate the venv first.
 
 ## Quick Start
 
-### 1) Fetch a quote
+### 1) Quote price
 
 ```bash
 python3 scripts/market_alert.py quote BTC --type crypto
 python3 scripts/market_alert.py quote AAPL --type stock
 ```
 
-### 2) Add an alert
-
-Bitcoin above 50,000:
+### 2) Add alerts
 
 ```bash
+# BTC > 50000
 python3 scripts/market_alert.py add \
-  --type crypto \
-  --symbol BTC \
-  --above 50000 \
-  --channel telegram \
-  --target @your_chat
+  --type crypto --symbol BTC --above 50000 \
+  --channel telegram --target @your_chat
+
+# AAPL < 200
+python3 scripts/market_alert.py add \
+  --type stock --symbol AAPL --below 200 \
+  --channel telegram --target @your_chat
 ```
 
-AAPL below 200:
+If `--channel` and `--target` are omitted, alerts are still evaluated, but output stays local.
 
-```bash
-python3 scripts/market_alert.py add \
-  --type stock \
-  --symbol AAPL \
-  --below 200 \
-  --channel telegram \
-  --target @your_chat
-```
-
-If `--channel`/`--target` are omitted, the alert still evaluates, but output is local-only (stdout/log).
-
-### 3) Check alerts immediately
-
-Dry-run (safe test, no outbound sends):
+### 3) Check alerts now
 
 ```bash
 python3 scripts/market_alert.py check --dry-run
-```
-
-Real delivery mode:
-
-```bash
 python3 scripts/market_alert.py check
 ```
 
-### 4) Install periodic checks (every 5 minutes)
+### 4) Install periodic checks
 
 ```bash
 python3 scripts/market_alert.py install-cron --minutes 5
-```
-
-Remove managed cron block:
-
-```bash
 python3 scripts/market_alert.py uninstall-cron
 ```
 
-## Command Reference
+### 5) Generate charts
+
+```bash
+# Stock (all indicators)
+.venv/bin/python scripts/market_alert.py chart AAPL --type stock --period 6mo --interval 1d --all-indicators
+
+# Crypto (15m minimum precision)
+.venv/bin/python scripts/market_alert.py chart BTC --type crypto --period 5d --interval 15m --all-indicators
+```
+
+### 6) Generate quick technical report
+
+```bash
+.venv/bin/python scripts/market_alert.py report BTC --type crypto --period 5d --interval 15m
+```
+
+## Commands
 
 ### `quote`
-
-Get current price with fallback provider chain.
 
 ```bash
 python3 scripts/market_alert.py quote <SYMBOL> [--type auto|crypto|stock] [--json]
 ```
 
-Examples:
-
-```bash
-python3 scripts/market_alert.py quote BTC --type crypto
-python3 scripts/market_alert.py quote ETH-USD --type auto
-python3 scripts/market_alert.py quote MSFT --type stock --json
-```
-
 ### `add`
-
-Create an alert rule.
 
 ```bash
 python3 scripts/market_alert.py add \
   --type crypto|stock \
   --symbol <SYMBOL> \
   (--above <PRICE> | --below <PRICE>) \
-  [--channel <CHANNEL>] \
-  [--target <TARGET>] \
-  [--note <TEXT>] \
-  [--json]
+  [--channel <CHANNEL>] [--target <TARGET>] [--note <TEXT>] [--json]
 ```
 
-Notes:
+Rules:
 
 - `--above` and `--below` are mutually exclusive
 - Threshold must be `> 0`
-- `--channel` and `--target` must be provided together
-- Duplicate active rules are de-duplicated
+- `--channel` and `--target` must be set together
 
 ### `list`
 
-Show configured alerts.
-
 ```bash
-python3 scripts/market_alert.py list
-python3 scripts/market_alert.py list --json
+python3 scripts/market_alert.py list [--json]
 ```
 
 ### `rm`
-
-Delete one alert by ID.
 
 ```bash
 python3 scripts/market_alert.py rm <ALERT_ID>
@@ -177,82 +139,110 @@ python3 scripts/market_alert.py rm <ALERT_ID>
 
 ### `check`
 
-Evaluate all enabled alerts and send notifications when threshold crossing occurs.
-
 ```bash
 python3 scripts/market_alert.py check [--dry-run] [--quiet] [--json] [--fail-on-error]
 ```
 
-Flags:
-
-- `--dry-run`: evaluate and format notifications without sending
-- `--quiet`: suppress per-alert log lines
-- `--json`: emit machine-readable summary/results
-- `--fail-on-error`: non-zero exit when provider checks fail
-
 ### `install-cron`
-
-Install a managed cron entry for periodic checks.
 
 ```bash
 python3 scripts/market_alert.py install-cron [--minutes N] [--cron "EXPR"] [--script-path PATH]
 ```
 
-Behavior:
-
-- Writes a managed block between:
-  - `# OPENCLAW_CRYPTO_STOCK_ALERT_START`
-  - `# OPENCLAW_CRYPTO_STOCK_ALERT_END`
-- Re-installs cleanly (removes previous managed block first)
-
 ### `uninstall-cron`
-
-Remove the managed cron block.
 
 ```bash
 python3 scripts/market_alert.py uninstall-cron
 ```
 
-## Data Providers and Fallback Strategy
+### `chart`
 
-The script tries providers in sequence and returns the first successful response.
-
-### Crypto quote order
-
-1. Yahoo Finance chart API
-2. CoinGecko simple price API
-3. Coinbase spot price API
-4. Binance ticker API
-
-### Stock quote order
-
-1. Yahoo Finance chart API
-2. Nasdaq quote API
-3. Stooq CSV API
-
-This design handles common outages such as rate limits or temporary endpoint failures.
-
-## Alert Semantics (Important)
-
-Alerts are **edge-triggered**, not level-triggered.
-
-- Trigger occurs only when condition changes from `false -> true`
-- If price stays above/below threshold, no repeated spam on every check
-- If price moves back and crosses again later, a new alert is emitted
-
-## Concurrency Safety
-
-`check` uses a file lock (`check.lock`) to prevent duplicate runs at the same time.
-
-If another check is running, a second invocation exits with:
-
-```text
-ERROR: another check process is already running
+```bash
+.venv/bin/python scripts/market_alert.py chart <SYMBOL> \
+  [--type auto|crypto|stock] \
+  [--period PERIOD] [--interval INTERVAL] \
+  [--chart-type candlestick|line] \
+  [--sma] [--ema] [--macd] [--rsi] [--bb] [--vol-ma] [--fib] [--all-indicators] \
+  [--no-volume] \
+  [--out PATH] [--dpi N] [--width N] [--height N] \
+  [--channel CHANNEL --target TARGET --message TEXT] [--dry-run-send] [--json]
 ```
 
-## State and Logs
+### `report`
 
-Default state directory:
+`report` behaves like `chart` but enforces a full indicator summary and outputs a chart path.
+
+```bash
+.venv/bin/python scripts/market_alert.py report <SYMBOL> [chart/report options]
+```
+
+## Market Data Fallback
+
+### Quote fallback
+
+- Crypto: `Yahoo -> CoinGecko -> Coinbase -> Binance`
+- Stock: `Yahoo -> Nasdaq -> Stooq`
+
+### Chart fallback
+
+- Crypto: `Yahoo OHLCV -> Binance klines`
+- Stock: `Yahoo OHLCV -> Stooq history` (daily/weekly fallback)
+
+## Timeframe and Precision Rules
+
+### Stocks
+
+Allowed `--period` values:
+
+- `1d`, `5d`, `1mo`, `3mo`, `6mo`, `1y`
+
+Allowed chart intervals:
+
+- `15m`, `30m`, `60m`, `90m`, `1d`, `1wk`
+
+### Crypto
+
+Allowed `--period` values:
+
+- `1d`, `5d`, `1mo`, `3mo`, `6mo`, `1y`, `2y`
+
+Allowed chart intervals:
+
+- `15m`, `30m`, `60m`, `90m`, `1d`, `1wk`
+
+Constraint:
+
+- Crypto minimum interval precision is **15m**
+
+Note:
+
+- If intraday interval is requested with periods longer than 60 days, interval may auto-adjust to `1d` because Yahoo intraday history is limited.
+
+## Indicator Set
+
+Supported indicators:
+
+- `SMA20`, `SMA50`
+- `EMA12`, `EMA26`
+- `MACD(12,26,9)`
+- `RSI14`
+- `Bollinger Bands(20,2)`
+- `Volume MA20`
+- `Fibonacci retracement`
+
+## Alert Semantics
+
+Alerts are edge-triggered:
+
+- Notify only when condition changes from `false -> true`
+- If price stays above/below threshold, no repeated notification
+- If condition resets and crosses again, new notification is sent
+
+`check` is lock-protected (`check.lock`) to avoid duplicate triggers under concurrent execution.
+
+## State Files
+
+Default directory:
 
 ```text
 ~/.openclaw/skills-data/crypto-stock-alert/
@@ -260,103 +250,69 @@ Default state directory:
 
 Files:
 
-- `alerts.json`: configured rules
-- `status.json`: last check state and trigger state per alert
-- `check.log`: cron check output (when installed by `install-cron`)
-- `check.lock`: runtime lock file for concurrent check protection
+- `alerts.json` - alert rules
+- `status.json` - latest condition/check state
+- `check.log` - cron check output
+- `check.lock` - runtime lock for `check`
+- `charts/` - generated PNG files
 
-Override state directory via environment variable:
+Override state directory:
 
 ```bash
 export OPENCLAW_MARKET_ALERT_STATE_DIR=/custom/path
 ```
 
-## Symbol Notes
+## OpenClaw Intent Mapping
 
-### Crypto
+Example request:
 
-- Accepted forms include aliases such as `BTC`, `XBT`, `bitcoin`, `ETH`, etc.
-- Script normalizes crypto to `<BASE>-USD` for primary quoting (for example `BTC-USD`)
+> "Set an alert when BTC exceeds 50,000 and check every 5 minutes."
 
-### Stocks
+Execution mapping:
 
-- Typical uppercase tickers are expected (`AAPL`, `MSFT`, `NVDA`)
+1. `add --type crypto --symbol BTC --above 50000`
+2. `install-cron --minutes 5`
+3. `check --dry-run`
 
-## OpenClaw Conversation Mapping
+Example request:
 
-Natural language request:
+> "Generate a BTC 15m candlestick chart with MACD and Fibonacci."
 
-> "Set an alert and remind me when BTC is above 50,000 dollars."
+Execution mapping:
 
-Suggested execution sequence:
-
-1. Add rule:
-
-```bash
-python3 scripts/market_alert.py add \
-  --type crypto --symbol BTC --above 50000 \
-  --channel telegram --target @your_chat
-```
-
-2. Ensure periodic check:
-
-```bash
-python3 scripts/market_alert.py install-cron --minutes 5
-```
-
-3. Run an immediate dry-run check and report status:
-
-```bash
-python3 scripts/market_alert.py check --dry-run
-```
+1. `chart BTC --type crypto --period 5d --interval 15m --macd --fib`
+2. Return `CHART_PATH`
+3. If asked, deliver via `--channel/--target`
 
 ## Troubleshooting
 
-### No notifications received
+### No alert delivery
 
-- Verify `channel`/`target` were set when adding alerts
-- Test OpenClaw send path manually:
+- Verify alert has `channel` and `target`
+- Test direct send path:
 
 ```bash
 openclaw message send --channel telegram --target @your_chat --message "test"
 ```
 
-- Run check without `--quiet` to inspect delivery output
+### Chart command fails with matplotlib error
 
-### Check exits with provider errors
+Install in venv and run with venv Python:
 
-- Re-run with `--json` to inspect failures
-- Confirm external APIs are reachable from host
-- Keep fallback order unchanged unless you have a known stable in-house source
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install matplotlib
+python scripts/market_alert.py chart BTC --type crypto --period 5d --interval 15m
+```
 
 ### Cron not running
 
-- Confirm cron block exists:
-
 ```bash
 crontab -l
-```
-
-- Inspect log:
-
-```bash
 tail -n 200 ~/.openclaw/skills-data/crypto-stock-alert/check.log
-```
-
-## Development
-
-Quick syntax validation:
-
-```bash
-python3 -m py_compile scripts/market_alert.py
-```
-
-Inspect CLI options:
-
-```bash
-python3 scripts/market_alert.py --help
 ```
 
 ## Disclaimer
 
-This tool is for automation convenience and operational alerts. It is not investment advice.
+This project is for automation and monitoring workflows. It is not investment advice.

@@ -1,15 +1,13 @@
 ---
 name: crypto-stock-alert
-description: 获取 crypto 与股票价格并设置阈值提醒（高于/低于），支持定期自动检查、消息推送和数据源 fallback。Use when the user asks to monitor prices like "BTC 超过 50000 提醒我" or "AAPL 跌破 200 提醒我", or asks to create/list/remove price alerts and schedule periodic checks.
+description: 获取 crypto 与股票价格、设置阈值告警、定期检查、并生成K线/技术指标图（SMA/EMA/MACD/RSI/BB/Fibonacci）。Use when users ask for price alerts like "BTC above 50000", stock/crypto chart generation, or indicator-based quick reports.
 ---
 
 # Crypto Stock Alert
 
-Use this skill to monitor cryptocurrency and stock prices, then trigger reminders when thresholds are crossed.
+Monitor crypto/stocks, trigger alerts, and generate chart images with technical indicators.
 
 ## Core Script
-
-Use:
 
 ```bash
 python3 {baseDir}/scripts/market_alert.py --help
@@ -20,34 +18,18 @@ State files:
 - `~/.openclaw/skills-data/crypto-stock-alert/alerts.json`
 - `~/.openclaw/skills-data/crypto-stock-alert/status.json`
 - `~/.openclaw/skills-data/crypto-stock-alert/check.log`
+- `~/.openclaw/skills-data/crypto-stock-alert/charts/`
 
-## Data Sources (with fallback)
+## Price + Alert Commands
 
-### Crypto
-
-1. Yahoo Finance chart API
-2. CoinGecko simple price API
-3. Coinbase spot price API
-4. Binance ticker API
-
-### Stock
-
-1. Yahoo Finance chart API
-2. Nasdaq quote API
-3. Stooq CSV API
-
-If one source fails, automatically try the next source.
-
-## Quick Commands
-
-### 1) Get quote
+### Quote
 
 ```bash
 python3 {baseDir}/scripts/market_alert.py quote BTC --type crypto
 python3 {baseDir}/scripts/market_alert.py quote AAPL --type stock
 ```
 
-### 2) Add alert
+### Add Alert
 
 ```bash
 # BTC > 50000
@@ -61,32 +43,71 @@ python3 {baseDir}/scripts/market_alert.py add \
   --channel telegram --target @your_chat
 ```
 
-If `--channel/--target` are omitted, alerts are still evaluated but only logged locally.
-
-### 3) List/remove alerts
+### Check / List / Remove
 
 ```bash
+python3 {baseDir}/scripts/market_alert.py check --dry-run
+python3 {baseDir}/scripts/market_alert.py check
 python3 {baseDir}/scripts/market_alert.py list
 python3 {baseDir}/scripts/market_alert.py rm <alert_id>
 ```
 
-### 4) Check alerts now
+### Periodic Check
 
 ```bash
-python3 {baseDir}/scripts/market_alert.py check
-# safe test without sending messages
-python3 {baseDir}/scripts/market_alert.py check --dry-run
-```
-
-### 5) Install periodic check
-
-```bash
-# every 5 minutes (default)
 python3 {baseDir}/scripts/market_alert.py install-cron --minutes 5
-
-# remove managed cron block
 python3 {baseDir}/scripts/market_alert.py uninstall-cron
 ```
+
+## Chart Generation
+
+Use `chart` for image output and optional indicator overlays.
+
+```bash
+python3 {baseDir}/scripts/market_alert.py chart AAPL --type stock --period 6mo --interval 1d --all-indicators
+python3 {baseDir}/scripts/market_alert.py chart BTC --type crypto --period 5d --interval 15m --all-indicators
+```
+
+### Stock constraints
+
+- `--period` must be one of: `1d 5d 1mo 3mo 6mo 1y`
+- Common intervals: `15m 30m 60m 90m 1d 1wk`
+
+### Crypto constraints
+
+- Interval options: `15m 30m 60m 90m 1d 1wk`
+- Minimum granularity is **15m**
+
+### Indicator flags
+
+- `--sma` : SMA20/SMA50
+- `--ema` : EMA12/EMA26
+- `--macd`: MACD(12,26,9)
+- `--rsi` : RSI14
+- `--bb`  : Bollinger Bands(20,2)
+- `--vol-ma`: Volume MA20
+- `--fib` : Fibonacci retracement
+- `--all-indicators` : enable all indicators
+
+## Quick Report
+
+`report` generates chart + full indicator summary.
+
+```bash
+python3 {baseDir}/scripts/market_alert.py report BTC --type crypto --period 5d --interval 15m
+```
+
+## Data Source Fallback
+
+### Quote
+
+- Crypto: Yahoo -> CoinGecko -> Coinbase -> Binance
+- Stock: Yahoo -> Nasdaq -> Stooq
+
+### Chart
+
+- Crypto: Yahoo OHLCV -> Binance klines
+- Stock: Yahoo OHLCV -> Stooq history (daily/weekly fallback)
 
 ## Natural Language Mapping
 
@@ -94,18 +115,24 @@ When user says:
 
 - "设置一个警告，当比特币价格超过50000美元时提醒我"
 
-Do this sequence:
+Action sequence:
 
-1. Convert intent to command:
-   - `type=crypto`, `symbol=BTC`, `direction=above`, `threshold=50000`
-2. If channel/target context is available, include `--channel` and `--target`
-3. Add alert using `add`
-4. Ensure periodic checking is enabled using `install-cron --minutes 5`
-5. Run one immediate dry-run check and report result
+1. Add alert (`type=crypto symbol=BTC above=50000`)
+2. Ensure periodic check (`install-cron --minutes 5`)
+3. Run immediate check (`check --dry-run`)
+
+When user says:
+
+- "给我比特币15分钟K线，带MACD和斐波拉契"
+
+Action sequence:
+
+1. Build chart command: `chart BTC --type crypto --period 5d --interval 15m --macd --fib`
+2. Run and return `CHART_PATH`
+3. If requested, send image via channel/target
 
 ## Behavior Notes
 
-- Alert is edge-triggered: notify only when condition changes from false to true.
-- If price stays above/below threshold, it does not repeatedly spam every check cycle.
-- When condition resets and crosses again later, notify again.
-- Concurrent `check` runs are lock-protected to avoid duplicate trigger races.
+- Alert is edge-triggered: notify only on false->true crossing.
+- Duplicate concurrent `check` runs are lock-protected.
+- Chart/report requires `matplotlib`; if missing, use venv install.

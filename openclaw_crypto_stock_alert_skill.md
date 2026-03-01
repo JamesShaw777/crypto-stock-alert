@@ -1,105 +1,83 @@
-# OpenClaw Skill 设计与落地：Crypto + 股票价格告警
+# OpenClaw Skill 落地说明：Crypto + Stock Alert + K线/指标生图
 
-## 目标
+## 目标范围
 
-实现一个 OpenClaw 技能，支持：
+本 skill 现在支持两大模块：
 
-1. 获取 crypto 与股票价格
-2. 设置阈值告警（高于/低于）
-3. 定期检查价格（默认每 5 分钟）
-4. 超过阈值时自动发送提醒
-5. 多数据源 fallback（主源失败自动切换）
+1. 价格告警模块（quote/add/check/cron）
+2. 图表分析模块（chart/report）
 
-## 已落地文件
+## 已实现能力
 
-- 技能定义：`/root/.openclaw/workspace/skills/crypto-stock-alert/SKILL.md`
-- 核心脚本：`/root/.openclaw/workspace/skills/crypto-stock-alert/scripts/market_alert.py`
+### A. 价格告警
 
-## 数据源选择（含 fallback）
+- crypto 与股票实时报价
+- 阈值告警（above / below）
+- 定期检查（cron）
+- 触发方式为边沿触发（false -> true）
+- 文件锁防并发重复触发
 
-### Crypto 价格
+### B. 生图与技术指标
 
-按顺序尝试：
+- 生成 PNG 图（candlestick 或 line）
+- 技术指标：
+  - SMA20/SMA50
+  - EMA12/EMA26
+  - MACD(12,26,9)
+  - RSI14
+  - Bollinger Bands(20,2)
+  - Volume MA20
+  - Fibonacci 回撤
+- `report` 命令输出图 + 指标摘要
 
-1. Yahoo Finance chart API
-2. CoinGecko simple price API
-3. Coinbase spot price API
-4. Binance ticker API
+## 你确认的约束已落地
 
-### 股票价格
+### 1) 股票常见周期
 
-按顺序尝试：
+股票 `--period` 限制为：
 
-1. Yahoo Finance chart API
-2. Nasdaq quote API
-3. Stooq CSV API
+- `1d 5d 1mo 3mo 6mo 1y`
 
-说明：任何单一源返回失败（超时/限流/格式异常）时，会自动尝试下一源。
+### 2) Crypto 最小精度 15min
 
-## 告警机制
+crypto `--interval` 最小支持到：
 
-- 规则类型：`above` / `below`
-- 触发策略：边沿触发（false -> true 时提醒）
-- 防刷屏：若价格持续在阈值同侧，不重复提醒
-- 重置条件：价格回到另一侧后再次穿越阈值，会再次提醒
-- 并发保护：`check` 带文件锁，避免并发执行导致重复提醒
+- `15m`（并支持 `30m 60m 90m 1d 1wk`）
 
-## 状态文件
+## 数据源与 fallback
 
-脚本运行时自动维护：
+### Quote
 
-- `~/.openclaw/skills-data/crypto-stock-alert/alerts.json`
-- `~/.openclaw/skills-data/crypto-stock-alert/status.json`
-- `~/.openclaw/skills-data/crypto-stock-alert/check.log`
+- Crypto: Yahoo -> CoinGecko -> Coinbase -> Binance
+- Stock: Yahoo -> Nasdaq -> Stooq
 
-## 命令示例
+### Chart
 
-### 1) 查询价格
+- Crypto: Yahoo OHLCV -> Binance klines
+- Stock: Yahoo OHLCV -> Stooq history（daily/weekly fallback）
 
-```bash
-python3 /root/.openclaw/workspace/skills/crypto-stock-alert/scripts/market_alert.py quote BTC --type crypto
-python3 /root/.openclaw/workspace/skills/crypto-stock-alert/scripts/market_alert.py quote AAPL --type stock
-```
-
-### 2) 设置告警（示例：BTC > 50000）
+## 核心命令
 
 ```bash
-python3 /root/.openclaw/workspace/skills/crypto-stock-alert/scripts/market_alert.py add \
-  --type crypto --symbol BTC --above 50000 \
-  --channel telegram --target @your_chat
+# 价格
+python3 scripts/market_alert.py quote BTC --type crypto
+
+# 告警
+python3 scripts/market_alert.py add --type crypto --symbol BTC --above 50000
+python3 scripts/market_alert.py check --dry-run
+python3 scripts/market_alert.py install-cron --minutes 5
+
+# 股票K线 + 全指标
+.venv/bin/python scripts/market_alert.py chart AAPL --type stock --period 6mo --interval 1d --all-indicators
+
+# Crypto 15m K线 + MACD + 斐波拉契
+.venv/bin/python scripts/market_alert.py chart BTC --type crypto --period 5d --interval 15m --macd --fib
+
+# 一键报告
+.venv/bin/python scripts/market_alert.py report BTC --type crypto --period 5d --interval 15m
 ```
 
-### 3) 定期检查（每 5 分钟）
+## 依赖说明
 
-```bash
-python3 /root/.openclaw/workspace/skills/crypto-stock-alert/scripts/market_alert.py install-cron --minutes 5
-```
-
-### 4) 立即检查（调试）
-
-```bash
-python3 /root/.openclaw/workspace/skills/crypto-stock-alert/scripts/market_alert.py check --dry-run
-python3 /root/.openclaw/workspace/skills/crypto-stock-alert/scripts/market_alert.py check
-```
-
-### 5) 查看 / 删除告警
-
-```bash
-python3 /root/.openclaw/workspace/skills/crypto-stock-alert/scripts/market_alert.py list
-python3 /root/.openclaw/workspace/skills/crypto-stock-alert/scripts/market_alert.py rm <alert_id>
-```
-
-## 与用户对话映射（OpenClaw）
-
-用户说：
-
-> 设置一个警告，当比特币价格超过 50000 美元时提醒我。
-
-OpenClaw 应执行：
-
-1. 解析为：`type=crypto`，`symbol=BTC`，`above=50000`
-2. 执行 `add` 命令创建告警
-3. 执行 `install-cron --minutes 5` 确保周期检查
-4. 执行 `check --dry-run` 回报当前检查结果
-
-如果当前会话可用 channel/target（如 Telegram chat id），应直接写入 `--channel/--target`，使提醒能自动投递。
+- 告警模块仅依赖 Python 标准库
+- 生图模块需 `matplotlib`，建议使用 venv 安装

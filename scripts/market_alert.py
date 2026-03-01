@@ -5,7 +5,8 @@ Features:
 - Fetch quotes with multi-provider fallback
 - Manage threshold alerts (above/below)
 - Periodic checks with edge-triggered notifications (crossing threshold)
-- Install/uninstall a managed system crontab entry
+- Generate chart images (candlestick/line)
+- Calculate technical indicators (SMA/EMA/MACD/RSI/BB/Fibonacci)
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import argparse
 import csv
 import fcntl
 import json
+import math
 import os
 import re
 import secrets
@@ -21,7 +23,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote_plus
@@ -36,9 +38,38 @@ ALERTS_FILE = STATE_DIR / "alerts.json"
 STATUS_FILE = STATE_DIR / "status.json"
 LOG_FILE = STATE_DIR / "check.log"
 LOCK_FILE = STATE_DIR / "check.lock"
+CHART_DIR = STATE_DIR / "charts"
 
 CRON_BLOCK_START = "# OPENCLAW_CRYPTO_STOCK_ALERT_START"
 CRON_BLOCK_END = "# OPENCLAW_CRYPTO_STOCK_ALERT_END"
+
+STOCK_PERIOD_CHOICES = ("1d", "5d", "1mo", "3mo", "6mo", "1y")
+STOCK_INTERVAL_CHOICES = ("15m", "30m", "60m", "90m", "1d", "1wk")
+CRYPTO_PERIOD_CHOICES = ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y")
+CRYPTO_INTERVAL_CHOICES = ("15m", "30m", "60m", "90m", "1d", "1wk")
+
+INTERVAL_ALIASES = {
+    "1h": "60m",
+}
+
+INTERVAL_MINUTES = {
+    "15m": 15,
+    "30m": 30,
+    "60m": 60,
+    "90m": 90,
+    "1d": 1440,
+    "1wk": 10080,
+}
+
+PERIOD_DAYS = {
+    "1d": 1,
+    "5d": 5,
+    "1mo": 30,
+    "3mo": 90,
+    "6mo": 180,
+    "1y": 365,
+    "2y": 730,
+}
 
 CRYPTO_ALIAS_TO_SYMBOL = {
     "BTC": "BTC",
@@ -74,6 +105,8 @@ COINGECKO_SYMBOL_TO_ID = {
     "MATIC": "matic-network",
 }
 
+FIB_RATIOS = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -88,6 +121,10 @@ def ts_to_iso(ts: Any) -> str:
 
 def ensure_state_dir() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def ensure_chart_dir() -> None:
+    CHART_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -195,6 +232,50 @@ def resolve_asset_type(symbol: str) -> str:
         return "crypto"
     return "stock"
 
+
+def canonical_interval(interval: str) -> str:
+    token = interval.strip().lower()
+    return INTERVAL_ALIASES.get(token, token)
+
+
+def interval_to_minutes(interval: str) -> int:
+    return INTERVAL_MINUTES.get(canonical_interval(interval), 0)
+
+
+def period_to_days(period: str) -> int:
+    return PERIOD_DAYS.get(period, 0)
+
+
+def validate_chart_period_interval(asset_type: str, period: str, interval: str) -> tuple[str, str, str]:
+    period = period.strip()
+    interval = canonical_interval(interval)
+
+    if asset_type == "stock":
+        if period not in STOCK_PERIOD_CHOICES:
+            raise ValueError(f"stock --period must be one of: {', '.join(STOCK_PERIOD_CHOICES)}")
+        if interval not in STOCK_INTERVAL_CHOICES:
+            raise ValueError(f"stock --interval must be one of: {', '.join(STOCK_INTERVAL_CHOICES)}")
+    else:
+        if period not in CRYPTO_PERIOD_CHOICES:
+            raise ValueError(f"crypto --period must be one of: {', '.join(CRYPTO_PERIOD_CHOICES)}")
+        if interval not in CRYPTO_INTERVAL_CHOICES:
+            raise ValueError(f"crypto --interval must be one of: {', '.join(CRYPTO_INTERVAL_CHOICES)}")
+        minutes = interval_to_minutes(interval)
+        if minutes and minutes < 15:
+            raise ValueError("crypto minimum interval precision is 15m")
+
+    # Yahoo intraday ranges are generally limited to ~60 days.
+    note = ""
+    days = period_to_days(period)
+    minutes = interval_to_minutes(interval)
+    if days > 60 and 0 < minutes < 1440:
+        note = f"interval auto-adjusted from {interval} to 1d because intraday history >60d is limited on Yahoo"
+        interval = "1d"
+
+    return period, interval, note
+
+
+# ----------------------- Quote providers -----------------------
 
 def fetch_from_yahoo_chart(symbol: str) -> tuple[float, str, str]:
     encoded = quote_plus(symbol)
@@ -316,22 +397,22 @@ def fetch_price(asset_type: str, symbol: str) -> dict[str, Any]:
 
     if asset_type == "crypto":
         base, quote_symbol = normalize_crypto_symbol(symbol)
-        providers: list[Callable[[], tuple[float, str, str]]] = [
-            lambda: fetch_from_yahoo_chart(quote_symbol),
-            lambda: fetch_from_coingecko(base),
-            lambda: fetch_from_coinbase(base),
-            lambda: fetch_from_binance(base),
+        providers: list[tuple[str, Callable[[], tuple[float, str, str]]]] = [
+            ("yahoo_chart", lambda: fetch_from_yahoo_chart(quote_symbol)),
+            ("coingecko", lambda: fetch_from_coingecko(base)),
+            ("coinbase", lambda: fetch_from_coinbase(base)),
+            ("binance", lambda: fetch_from_binance(base)),
         ]
         resolved_symbol = quote_symbol
     else:
         resolved_symbol = normalize_stock_symbol(symbol)
         providers = [
-            lambda: fetch_from_yahoo_chart(resolved_symbol),
-            lambda: fetch_from_nasdaq(resolved_symbol),
-            lambda: fetch_from_stooq(resolved_symbol),
+            ("yahoo_chart", lambda: fetch_from_yahoo_chart(resolved_symbol)),
+            ("nasdaq", lambda: fetch_from_nasdaq(resolved_symbol)),
+            ("stooq", lambda: fetch_from_stooq(resolved_symbol)),
         ]
 
-    for provider in providers:
+    for provider_name, provider in providers:
         try:
             price, as_of, source = provider()
             return {
@@ -340,15 +421,707 @@ def fetch_price(asset_type: str, symbol: str) -> dict[str, Any]:
                 "symbol": resolved_symbol,
                 "price": float(price),
                 "source": source,
+                "provider": provider_name,
                 "as_of": as_of,
                 "checked_at": now_iso(),
             }
         except Exception as exc:
-            provider_name = getattr(provider, "__name__", "provider")
             errors.append(f"{provider_name}: {exc}")
 
     raise RuntimeError("all providers failed: " + " | ".join(errors))
 
+
+# ----------------------- OHLC providers -----------------------
+
+def fetch_ohlcv_from_yahoo(symbol: str, period: str, interval: str) -> tuple[list[dict[str, Any]], str, str]:
+    encoded_symbol = quote_plus(symbol)
+    encoded_period = quote_plus(period)
+    encoded_interval = quote_plus(interval)
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded_symbol}"
+        f"?range={encoded_period}&interval={encoded_interval}&includePrePost=false&events=div%2Csplits"
+    )
+    payload = http_get_json(url)
+    result = payload.get("chart", {}).get("result")
+    if not result:
+        error_node = payload.get("chart", {}).get("error")
+        raise RuntimeError(f"yahoo chart no result: {error_node}")
+
+    node = result[0]
+    timestamps = node.get("timestamp") or []
+    quote = (node.get("indicators") or {}).get("quote") or []
+    if not timestamps or not quote:
+        raise RuntimeError("yahoo chart missing timestamps/quote")
+
+    q0 = quote[0]
+    opens = q0.get("open") or []
+    highs = q0.get("high") or []
+    lows = q0.get("low") or []
+    closes = q0.get("close") or []
+    volumes = q0.get("volume") or []
+
+    candles: list[dict[str, Any]] = []
+    for idx, ts in enumerate(timestamps):
+        if idx >= len(opens) or idx >= len(highs) or idx >= len(lows) or idx >= len(closes):
+            continue
+
+        o = opens[idx]
+        h = highs[idx]
+        l = lows[idx]
+        c = closes[idx]
+        if not all(isinstance(v, (int, float)) for v in [o, h, l, c]):
+            continue
+
+        v = volumes[idx] if idx < len(volumes) and isinstance(volumes[idx], (int, float)) else 0.0
+        dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+        candles.append(
+            {
+                "dt": dt,
+                "open": float(o),
+                "high": float(h),
+                "low": float(l),
+                "close": float(c),
+                "volume": float(v),
+            }
+        )
+
+    if not candles:
+        raise RuntimeError("yahoo chart returned no valid candles")
+
+    as_of = candles[-1]["dt"].replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return candles, as_of, "yahoo_chart"
+
+
+def fetch_ohlcv_from_binance(base_symbol: str, period: str, interval: str) -> tuple[list[dict[str, Any]], str, str]:
+    mapping = {
+        "15m": "15m",
+        "30m": "30m",
+        "60m": "1h",
+        "90m": "2h",
+        "1d": "1d",
+        "1wk": "1w",
+    }
+    if interval not in mapping:
+        raise RuntimeError(f"binance unsupported interval: {interval}")
+
+    binance_interval = mapping[interval]
+    days = max(period_to_days(period), 1)
+    step_minutes = max(interval_to_minutes(interval), 1)
+    raw_limit = int(math.ceil((days * 24 * 60) / step_minutes)) + 5
+    limit = min(max(raw_limit, 50), 1000)
+
+    symbol = f"{base_symbol}USDT"
+    url = (
+        "https://api.binance.com/api/v3/klines"
+        f"?symbol={quote_plus(symbol)}&interval={quote_plus(binance_interval)}&limit={limit}"
+    )
+    payload = http_get_json(url)
+    if not isinstance(payload, list) or not payload:
+        raise RuntimeError("binance klines returned no rows")
+
+    candles: list[dict[str, Any]] = []
+    for row in payload:
+        if not isinstance(row, list) or len(row) < 6:
+            continue
+        try:
+            dt = datetime.fromtimestamp(int(row[0]) / 1000.0, tz=timezone.utc)
+            o = float(row[1])
+            h = float(row[2])
+            l = float(row[3])
+            c = float(row[4])
+            v = float(row[5])
+        except Exception:
+            continue
+        candles.append(
+            {
+                "dt": dt,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": v,
+            }
+        )
+
+    if not candles:
+        raise RuntimeError("binance klines returned no valid candles")
+
+    as_of = candles[-1]["dt"].replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return candles, as_of, "binance_klines"
+
+
+def aggregate_weekly(candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[int, int], dict[str, Any]] = {}
+    for candle in candles:
+        dt = candle["dt"]
+        year, week, _ = dt.isocalendar()
+        key = (int(year), int(week))
+
+        bucket = grouped.get(key)
+        if bucket is None:
+            grouped[key] = {
+                "dt": dt,
+                "open": candle["open"],
+                "high": candle["high"],
+                "low": candle["low"],
+                "close": candle["close"],
+                "volume": candle["volume"],
+            }
+            continue
+
+        bucket["dt"] = dt
+        bucket["high"] = max(bucket["high"], candle["high"])
+        bucket["low"] = min(bucket["low"], candle["low"])
+        bucket["close"] = candle["close"]
+        bucket["volume"] += candle["volume"]
+
+    out = sorted(grouped.values(), key=lambda x: x["dt"])
+    return out
+
+
+def fetch_ohlcv_from_stooq(stock_symbol: str, period: str, interval: str) -> tuple[list[dict[str, Any]], str, str]:
+    if interval not in ("1d", "1wk"):
+        raise RuntimeError("stooq history fallback supports only 1d or 1wk")
+
+    stooq_symbol = to_stooq_symbol(stock_symbol)
+    url = f"https://stooq.com/q/d/l/?s={quote_plus(stooq_symbol)}&i=d"
+    text = http_get_text(url)
+
+    rows = list(csv.DictReader(text.splitlines()))
+    if not rows:
+        raise RuntimeError("stooq history returned empty csv")
+
+    days = max(period_to_days(period), 1)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days + 7)
+
+    candles: list[dict[str, Any]] = []
+    for row in rows:
+        date_txt = str(row.get("Date", "")).strip()
+        if not date_txt:
+            continue
+        try:
+            dt = datetime.strptime(date_txt, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            o = float(row.get("Open", "nan"))
+            h = float(row.get("High", "nan"))
+            l = float(row.get("Low", "nan"))
+            c = float(row.get("Close", "nan"))
+            v_raw = row.get("Volume", "0")
+            v = float(v_raw) if v_raw not in ("", "-") else 0.0
+        except Exception:
+            continue
+
+        if dt < cutoff:
+            continue
+        if any(math.isnan(x) for x in [o, h, l, c]):
+            continue
+
+        candles.append(
+            {
+                "dt": dt,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": v,
+            }
+        )
+
+    if not candles:
+        raise RuntimeError("stooq history returned no candles in selected period")
+
+    candles.sort(key=lambda x: x["dt"])
+    if interval == "1wk":
+        candles = aggregate_weekly(candles)
+
+    as_of = candles[-1]["dt"].replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return candles, as_of, "stooq_history"
+
+
+def fetch_chart_data(asset_type: str, symbol: str, period: str, interval: str) -> dict[str, Any]:
+    errors: list[str] = []
+
+    if asset_type == "crypto":
+        base, resolved_symbol = normalize_crypto_symbol(symbol)
+        providers: list[tuple[str, Callable[[], tuple[list[dict[str, Any]], str, str]]]] = [
+            ("yahoo_chart", lambda: fetch_ohlcv_from_yahoo(resolved_symbol, period, interval)),
+            ("binance_klines", lambda: fetch_ohlcv_from_binance(base, period, interval)),
+        ]
+    else:
+        resolved_symbol = normalize_stock_symbol(symbol)
+        providers = [("yahoo_chart", lambda: fetch_ohlcv_from_yahoo(resolved_symbol, period, interval))]
+        if interval in ("1d", "1wk"):
+            providers.append(("stooq_history", lambda: fetch_ohlcv_from_stooq(resolved_symbol, period, interval)))
+
+    for provider_name, provider in providers:
+        try:
+            candles, as_of, source = provider()
+            return {
+                "asset_type": asset_type,
+                "input_symbol": symbol,
+                "symbol": resolved_symbol,
+                "period": period,
+                "interval": interval,
+                "source": source,
+                "provider": provider_name,
+                "as_of": as_of,
+                "checked_at": now_iso(),
+                "candles": candles,
+            }
+        except Exception as exc:
+            errors.append(f"{provider_name}: {exc}")
+
+    raise RuntimeError("all chart providers failed: " + " | ".join(errors))
+
+
+# ----------------------- Indicator math -----------------------
+
+def rolling_mean(values: list[float], window: int) -> list[float | None]:
+    n = len(values)
+    out: list[float | None] = [None] * n
+    if window <= 0:
+        return out
+
+    acc = 0.0
+    for idx, value in enumerate(values):
+        acc += value
+        if idx >= window:
+            acc -= values[idx - window]
+        if idx >= window - 1:
+            out[idx] = acc / window
+    return out
+
+
+def rolling_std(values: list[float], window: int) -> list[float | None]:
+    n = len(values)
+    out: list[float | None] = [None] * n
+    if window <= 1:
+        return out
+
+    for idx in range(window - 1, n):
+        win = values[idx - window + 1 : idx + 1]
+        mean = sum(win) / window
+        var = sum((v - mean) ** 2 for v in win) / window
+        out[idx] = math.sqrt(var)
+    return out
+
+
+def ema_series(values: list[float], span: int) -> list[float | None]:
+    n = len(values)
+    out: list[float | None] = [None] * n
+    if span <= 0:
+        return out
+
+    k = 2.0 / (span + 1.0)
+    ema_val: float | None = None
+    for idx, value in enumerate(values):
+        if ema_val is None:
+            ema_val = value
+        else:
+            ema_val = value * k + ema_val * (1.0 - k)
+        if idx >= span - 1:
+            out[idx] = ema_val
+    return out
+
+
+def macd_series(closes: list[float]) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    ema12 = ema_series(closes, 12)
+    ema26 = ema_series(closes, 26)
+
+    macd_line: list[float | None] = [None] * len(closes)
+    macd_compact: list[float] = []
+    idx_map: list[int] = []
+
+    for idx, (e12, e26) in enumerate(zip(ema12, ema26)):
+        if e12 is None or e26 is None:
+            continue
+        value = e12 - e26
+        macd_line[idx] = value
+        macd_compact.append(value)
+        idx_map.append(idx)
+
+    signal_compact = ema_series(macd_compact, 9)
+    signal_line: list[float | None] = [None] * len(closes)
+    hist_line: list[float | None] = [None] * len(closes)
+
+    for compact_idx, real_idx in enumerate(idx_map):
+        signal = signal_compact[compact_idx]
+        if signal is None:
+            continue
+        macd_value = macd_line[real_idx]
+        if macd_value is None:
+            continue
+        signal_line[real_idx] = signal
+        hist_line[real_idx] = macd_value - signal
+
+    return macd_line, signal_line, hist_line
+
+
+def rsi_series(closes: list[float], period: int = 14) -> list[float | None]:
+    n = len(closes)
+    out: list[float | None] = [None] * n
+    if n <= period:
+        return out
+
+    gains = [0.0] * n
+    losses = [0.0] * n
+    for idx in range(1, n):
+        diff = closes[idx] - closes[idx - 1]
+        gains[idx] = max(diff, 0.0)
+        losses[idx] = max(-diff, 0.0)
+
+    avg_gain = sum(gains[1 : period + 1]) / period
+    avg_loss = sum(losses[1 : period + 1]) / period
+
+    if avg_loss == 0:
+        out[period] = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        out[period] = 100.0 - (100.0 / (1.0 + rs))
+
+    for idx in range(period + 1, n):
+        avg_gain = ((avg_gain * (period - 1)) + gains[idx]) / period
+        avg_loss = ((avg_loss * (period - 1)) + losses[idx]) / period
+
+        if avg_loss == 0:
+            out[idx] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            out[idx] = 100.0 - (100.0 / (1.0 + rs))
+
+    return out
+
+
+def fibonacci_levels(highs: list[float], lows: list[float], closes: list[float]) -> dict[str, Any]:
+    hi = max(highs)
+    lo = min(lows)
+    diff = hi - lo
+    if diff <= 0:
+        return {"trend": "flat", "levels": []}
+
+    uptrend = closes[-1] >= closes[0]
+    levels: list[dict[str, float]] = []
+    if uptrend:
+        for ratio in FIB_RATIOS:
+            levels.append({"ratio": ratio, "price": hi - diff * ratio})
+        trend = "up"
+    else:
+        for ratio in FIB_RATIOS:
+            levels.append({"ratio": ratio, "price": lo + diff * ratio})
+        trend = "down"
+
+    return {
+        "trend": trend,
+        "high": hi,
+        "low": lo,
+        "levels": levels,
+    }
+
+
+def series_to_plot_array(series: list[float | None]) -> list[float]:
+    out: list[float] = []
+    for value in series:
+        if value is None:
+            out.append(float("nan"))
+        else:
+            out.append(float(value))
+    return out
+
+
+def last_valid(series: list[float | None]) -> float | None:
+    for value in reversed(series):
+        if value is not None:
+            return float(value)
+    return None
+
+
+def compute_indicators(candles: list[dict[str, Any]], flags: dict[str, bool]) -> dict[str, Any]:
+    closes = [float(c["close"]) for c in candles]
+    highs = [float(c["high"]) for c in candles]
+    lows = [float(c["low"]) for c in candles]
+    volumes = [float(c["volume"]) for c in candles]
+
+    out: dict[str, Any] = {
+        "closes": closes,
+        "highs": highs,
+        "lows": lows,
+        "volumes": volumes,
+    }
+
+    if flags.get("sma"):
+        out["sma20"] = rolling_mean(closes, 20)
+        out["sma50"] = rolling_mean(closes, 50)
+
+    if flags.get("ema"):
+        out["ema12"] = ema_series(closes, 12)
+        out["ema26"] = ema_series(closes, 26)
+
+    if flags.get("macd"):
+        macd_line, signal_line, hist_line = macd_series(closes)
+        out["macd_line"] = macd_line
+        out["macd_signal"] = signal_line
+        out["macd_hist"] = hist_line
+
+    if flags.get("rsi"):
+        out["rsi14"] = rsi_series(closes, 14)
+
+    if flags.get("bb"):
+        bb_mid = rolling_mean(closes, 20)
+        bb_std = rolling_std(closes, 20)
+        bb_upper: list[float | None] = [None] * len(closes)
+        bb_lower: list[float | None] = [None] * len(closes)
+        for idx, (mid, std) in enumerate(zip(bb_mid, bb_std)):
+            if mid is None or std is None:
+                continue
+            bb_upper[idx] = mid + 2.0 * std
+            bb_lower[idx] = mid - 2.0 * std
+        out["bb_mid"] = bb_mid
+        out["bb_upper"] = bb_upper
+        out["bb_lower"] = bb_lower
+
+    if flags.get("vol_ma"):
+        out["vol_ma20"] = rolling_mean(volumes, 20)
+
+    if flags.get("fib"):
+        out["fib"] = fibonacci_levels(highs, lows, closes)
+
+    return out
+
+
+def nearest_fib_levels(fib: dict[str, Any], price: float) -> tuple[dict[str, float] | None, dict[str, float] | None]:
+    levels = fib.get("levels") or []
+    below = None
+    above = None
+    for level in levels:
+        value = float(level["price"])
+        if value <= price:
+            if below is None or value > float(below["price"]):
+                below = level
+        if value >= price:
+            if above is None or value < float(above["price"]):
+                above = level
+    return below, above
+
+
+# ----------------------- Plotting -----------------------
+
+def default_chart_path(symbol: str, period: str, interval: str, chart_type: str) -> Path:
+    ensure_chart_dir()
+    safe_symbol = re.sub(r"[^A-Za-z0-9._-]+", "_", symbol)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"{safe_symbol}_{period}_{interval}_{chart_type}_{stamp}.png"
+    return CHART_DIR / filename
+
+
+def render_chart_png(
+    chart_payload: dict[str, Any],
+    indicators: dict[str, Any],
+    chart_type: str,
+    show_volume: bool,
+    show_rsi: bool,
+    show_macd: bool,
+    out_path: Path,
+    width: float,
+    height: float,
+    dpi: int,
+) -> None:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+    except Exception as exc:
+        raise RuntimeError(
+            "matplotlib is required for chart generation. Install via a virtualenv, e.g. "
+            "python3 -m venv .venv && .venv/bin/pip install matplotlib"
+        ) from exc
+
+    candles = chart_payload["candles"]
+    dates = [c["dt"].astimezone(timezone.utc).replace(tzinfo=None) for c in candles]
+    x = [mdates.date2num(dt) for dt in dates]
+
+    opens = [c["open"] for c in candles]
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
+    closes = [c["close"] for c in candles]
+    volumes = [c["volume"] for c in candles]
+
+    panel_names = ["price"]
+    if show_volume:
+        panel_names.append("volume")
+    if show_rsi and "rsi14" in indicators:
+        panel_names.append("rsi")
+    if show_macd and "macd_line" in indicators:
+        panel_names.append("macd")
+
+    ratio_map = {
+        "price": 5,
+        "volume": 2,
+        "rsi": 2,
+        "macd": 2,
+    }
+    ratios = [ratio_map[name] for name in panel_names]
+
+    fig, axes = plt.subplots(
+        nrows=len(panel_names),
+        ncols=1,
+        figsize=(width, height),
+        sharex=True,
+        gridspec_kw={"height_ratios": ratios},
+    )
+    if len(panel_names) == 1:
+        axes = [axes]
+
+    ax_by_name = {name: axes[idx] for idx, name in enumerate(panel_names)}
+
+    diffs = [x[idx] - x[idx - 1] for idx in range(1, len(x)) if x[idx] - x[idx - 1] > 0]
+    if diffs:
+        step = sorted(diffs)[len(diffs) // 2]
+        width_candle = max(step * 0.6, 0.0006)
+    else:
+        width_candle = 0.02
+
+    up_color = "#16a34a"
+    down_color = "#dc2626"
+
+    ax_price = ax_by_name["price"]
+    if chart_type == "candlestick":
+        for idx, xv in enumerate(x):
+            o = opens[idx]
+            h = highs[idx]
+            l = lows[idx]
+            c = closes[idx]
+            color = up_color if c >= o else down_color
+
+            ax_price.plot([xv, xv], [l, h], color=color, linewidth=0.9, alpha=0.9)
+
+            body_bottom = min(o, c)
+            body_height = abs(c - o)
+            if body_height == 0:
+                body_height = max((h - l) * 0.02, 1e-6)
+            rect = Rectangle(
+                (xv - width_candle / 2.0, body_bottom),
+                width_candle,
+                body_height,
+                facecolor=color,
+                edgecolor=color,
+                linewidth=0.8,
+                alpha=0.85,
+            )
+            ax_price.add_patch(rect)
+    else:
+        ax_price.plot(x, closes, color="#2563eb", linewidth=1.5, label="Close")
+
+    if "sma20" in indicators:
+        ax_price.plot(x, series_to_plot_array(indicators["sma20"]), linewidth=1.1, color="#f59e0b", label="SMA20")
+    if "sma50" in indicators:
+        ax_price.plot(x, series_to_plot_array(indicators["sma50"]), linewidth=1.1, color="#b45309", label="SMA50")
+
+    if "ema12" in indicators:
+        ax_price.plot(x, series_to_plot_array(indicators["ema12"]), linewidth=1.1, color="#0ea5e9", label="EMA12")
+    if "ema26" in indicators:
+        ax_price.plot(x, series_to_plot_array(indicators["ema26"]), linewidth=1.1, color="#6366f1", label="EMA26")
+
+    if "bb_upper" in indicators and "bb_lower" in indicators and "bb_mid" in indicators:
+        bb_upper = series_to_plot_array(indicators["bb_upper"])
+        bb_lower = series_to_plot_array(indicators["bb_lower"])
+        bb_mid = series_to_plot_array(indicators["bb_mid"])
+        ax_price.plot(x, bb_upper, linewidth=1.0, color="#7c3aed", alpha=0.9, label="BB Upper")
+        ax_price.plot(x, bb_lower, linewidth=1.0, color="#7c3aed", alpha=0.9, label="BB Lower")
+        ax_price.plot(x, bb_mid, linewidth=0.9, color="#a78bfa", alpha=0.9, label="BB Mid")
+        ax_price.fill_between(x, bb_lower, bb_upper, color="#c4b5fd", alpha=0.08)
+
+    fib = indicators.get("fib")
+    if fib and fib.get("levels"):
+        for level in fib["levels"]:
+            ratio = float(level["ratio"])
+            value = float(level["price"])
+            ax_price.axhline(value, color="#64748b", linewidth=0.8, alpha=0.35)
+            ax_price.text(
+                x[-1] + width_candle * 0.4,
+                value,
+                f"Fib {ratio:.3f}",
+                fontsize=7,
+                color="#475569",
+                va="center",
+            )
+
+    ax_price.grid(True, alpha=0.15)
+    ax_price.set_ylabel("Price (USD)")
+    handles, labels = ax_price.get_legend_handles_labels()
+    if handles:
+        ax_price.legend(loc="upper left", fontsize=8, ncol=2)
+
+    if "volume" in ax_by_name:
+        ax_volume = ax_by_name["volume"]
+        bar_colors = [up_color if closes[idx] >= opens[idx] else down_color for idx in range(len(closes))]
+        ax_volume.bar(x, volumes, width=width_candle, color=bar_colors, alpha=0.45)
+        if "vol_ma20" in indicators:
+            ax_volume.plot(x, series_to_plot_array(indicators["vol_ma20"]), color="#0f766e", linewidth=1.2, label="Vol MA20")
+            ax_volume.legend(loc="upper left", fontsize=8)
+        ax_volume.set_ylabel("Volume")
+        ax_volume.grid(True, alpha=0.15)
+
+    if "rsi" in ax_by_name and "rsi14" in indicators:
+        ax_rsi = ax_by_name["rsi"]
+        ax_rsi.plot(x, series_to_plot_array(indicators["rsi14"]), color="#0891b2", linewidth=1.2, label="RSI14")
+        ax_rsi.axhline(70, color="#dc2626", linewidth=0.9, linestyle="--", alpha=0.8)
+        ax_rsi.axhline(30, color="#16a34a", linewidth=0.9, linestyle="--", alpha=0.8)
+        ax_rsi.set_ylim(0, 100)
+        ax_rsi.set_ylabel("RSI")
+        ax_rsi.grid(True, alpha=0.15)
+        ax_rsi.legend(loc="upper left", fontsize=8)
+
+    if "macd" in ax_by_name and "macd_line" in indicators and "macd_signal" in indicators and "macd_hist" in indicators:
+        ax_macd = ax_by_name["macd"]
+        macd_line = indicators["macd_line"]
+        macd_signal = indicators["macd_signal"]
+        macd_hist = indicators["macd_hist"]
+
+        hist_vals = series_to_plot_array(macd_hist)
+        hist_colors = ["#16a34a" if (not math.isnan(v) and v >= 0) else "#dc2626" for v in hist_vals]
+        ax_macd.bar(x, hist_vals, width=width_candle, color=hist_colors, alpha=0.4, label="MACD Hist")
+        ax_macd.plot(x, series_to_plot_array(macd_line), color="#1d4ed8", linewidth=1.1, label="MACD")
+        ax_macd.plot(x, series_to_plot_array(macd_signal), color="#f97316", linewidth=1.1, label="Signal")
+        ax_macd.axhline(0, color="#334155", linewidth=0.8, alpha=0.7)
+        ax_macd.set_ylabel("MACD")
+        ax_macd.grid(True, alpha=0.15)
+        ax_macd.legend(loc="upper left", fontsize=8)
+
+    minutes = interval_to_minutes(chart_payload["interval"])
+    if 0 < minutes < 1440:
+        # For intraday charts, prefer explicit hour-based ticks to avoid noisy auto-locator behavior.
+        tick_hours = max(1, int((period_to_days(chart_payload["period"]) * 24) / 8))
+        locator = mdates.HourLocator(interval=tick_hours)
+        formatter = mdates.DateFormatter("%m-%d %H:%M")
+    else:
+        locator = mdates.AutoDateLocator(minticks=6, maxticks=10)
+        formatter = mdates.DateFormatter("%Y-%m-%d")
+    axes[-1].xaxis.set_major_locator(locator)
+    axes[-1].xaxis.set_major_formatter(formatter)
+    for tick in axes[-1].get_xticklabels():
+        tick.set_rotation(30)
+        tick.set_ha("right")
+
+    last_close = closes[-1]
+    prev_close = closes[-2] if len(closes) >= 2 else closes[-1]
+    change_pct = ((last_close - prev_close) / prev_close * 100.0) if prev_close else 0.0
+
+    fig.suptitle(
+        f"{chart_payload['symbol']}  {chart_payload['asset_type']}  {chart_type}"
+        f"  range={chart_payload['period']} interval={chart_payload['interval']}"
+        f"  close={last_close:.4f} ({change_pct:+.2f}%)  source={chart_payload['source']}",
+        fontsize=12,
+    )
+    fig.tight_layout(rect=[0.01, 0.02, 0.99, 0.95])
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=dpi)
+    plt.close(fig)
+
+
+# ----------------------- Alerts + notification -----------------------
 
 def evaluate_condition(price: float, direction: str, threshold: float) -> bool:
     if direction == "above":
@@ -409,6 +1182,41 @@ def send_notification(alert: dict[str, Any], message: str, dry_run: bool = False
     return False
 
 
+def send_media_notification(channel: str, target: str, message: str, media_path: Path, dry_run: bool = False) -> bool:
+    cmd = [
+        "openclaw",
+        "message",
+        "send",
+        "--channel",
+        channel,
+        "--target",
+        target,
+        "--message",
+        message,
+        "--media",
+        str(media_path),
+    ]
+    if dry_run:
+        print("DRY_RUN send:", " ".join(shlex.quote(part) for part in cmd))
+        return True
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0:
+        print(f"DELIVERED media -> {channel}:{target}")
+        return True
+
+    print(f"DELIVERY_FAILED media rc={proc.returncode}")
+    stderr = (proc.stderr or "").strip()
+    stdout = (proc.stdout or "").strip()
+    if stderr:
+        print("stderr:", stderr)
+    if stdout:
+        print("stdout:", stdout)
+    return False
+
+
+# ----------------------- Cron helpers -----------------------
+
 def read_crontab_lines() -> list[str]:
     proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     if proc.returncode != 0:
@@ -465,6 +1273,70 @@ def build_cron_schedule(minutes: int | None, cron_expr: str | None) -> str:
         return "* * * * *"
     return f"*/{minutes} * * * *"
 
+
+# ----------------------- Report helpers -----------------------
+
+def build_indicator_summary(chart_payload: dict[str, Any], indicators: dict[str, Any]) -> list[str]:
+    closes = indicators["closes"]
+    last_close = closes[-1]
+    prev_close = closes[-2] if len(closes) >= 2 else closes[-1]
+    change_pct = ((last_close - prev_close) / prev_close * 100.0) if prev_close else 0.0
+
+    lines = [
+        f"Symbol: {chart_payload['symbol']} ({chart_payload['asset_type']})",
+        f"Range/Interval: {chart_payload['period']} / {chart_payload['interval']}",
+        f"Last Close: {last_close:.6f} USD ({change_pct:+.2f}%)",
+        f"Source: {chart_payload['source']} (as_of={chart_payload['as_of']})",
+    ]
+
+    sma20 = last_valid(indicators.get("sma20", []))
+    sma50 = last_valid(indicators.get("sma50", []))
+    if sma20 is not None or sma50 is not None:
+        lines.append(f"SMA: 20={sma20:.6f} 50={sma50:.6f}" if sma20 is not None and sma50 is not None else "SMA: partial")
+
+    ema12 = last_valid(indicators.get("ema12", []))
+    ema26 = last_valid(indicators.get("ema26", []))
+    if ema12 is not None or ema26 is not None:
+        lines.append(f"EMA: 12={ema12:.6f} 26={ema26:.6f}" if ema12 is not None and ema26 is not None else "EMA: partial")
+
+    macd_val = last_valid(indicators.get("macd_line", []))
+    macd_sig = last_valid(indicators.get("macd_signal", []))
+    macd_hist = last_valid(indicators.get("macd_hist", []))
+    if macd_val is not None and macd_sig is not None and macd_hist is not None:
+        lines.append(f"MACD: line={macd_val:.6f} signal={macd_sig:.6f} hist={macd_hist:.6f}")
+
+    rsi_val = last_valid(indicators.get("rsi14", []))
+    if rsi_val is not None:
+        zone = "neutral"
+        if rsi_val >= 70:
+            zone = "overbought"
+        elif rsi_val <= 30:
+            zone = "oversold"
+        lines.append(f"RSI14: {rsi_val:.2f} ({zone})")
+
+    bb_upper = last_valid(indicators.get("bb_upper", []))
+    bb_mid = last_valid(indicators.get("bb_mid", []))
+    bb_lower = last_valid(indicators.get("bb_lower", []))
+    if bb_upper is not None and bb_mid is not None and bb_lower is not None:
+        position = "inside"
+        if last_close > bb_upper:
+            position = "above-upper"
+        elif last_close < bb_lower:
+            position = "below-lower"
+        lines.append(f"Bollinger(20,2): upper={bb_upper:.6f} mid={bb_mid:.6f} lower={bb_lower:.6f} ({position})")
+
+    fib = indicators.get("fib")
+    if fib and fib.get("levels"):
+        below, above = nearest_fib_levels(fib, last_close)
+        trend = fib.get("trend", "unknown")
+        low_txt = f"{below['ratio']:.3f}@{below['price']:.6f}" if below else "n/a"
+        high_txt = f"{above['ratio']:.3f}@{above['price']:.6f}" if above else "n/a"
+        lines.append(f"Fibonacci ({trend}): nearest_below={low_txt} nearest_above={high_txt}")
+
+    return lines
+
+
+# ----------------------- Command handlers -----------------------
 
 def cmd_quote(args: argparse.Namespace) -> int:
     asset_type = args.type
@@ -746,8 +1618,157 @@ def cmd_uninstall_cron(_: argparse.Namespace) -> int:
     return 0
 
 
+def build_chart_flags(args: argparse.Namespace) -> dict[str, bool]:
+    if args.all_indicators:
+        return {
+            "sma": True,
+            "ema": True,
+            "macd": True,
+            "rsi": True,
+            "bb": True,
+            "vol_ma": True,
+            "fib": True,
+        }
+
+    return {
+        "sma": bool(args.sma),
+        "ema": bool(args.ema),
+        "macd": bool(args.macd),
+        "rsi": bool(args.rsi),
+        "bb": bool(args.bb),
+        "vol_ma": bool(args.vol_ma),
+        "fib": bool(args.fib),
+    }
+
+
+def resolve_chart_defaults(asset_type: str, period: str, interval: str) -> tuple[str, str]:
+    out_period = period.strip() if period else ""
+    out_interval = interval.strip() if interval else ""
+
+    if asset_type == "stock":
+        if not out_period:
+            out_period = "6mo"
+        if not out_interval:
+            out_interval = "1d"
+    else:
+        if not out_period:
+            out_period = "5d"
+        if not out_interval:
+            out_interval = "15m"
+
+    return out_period, out_interval
+
+
+def cmd_chart(args: argparse.Namespace) -> int:
+    asset_type = args.type
+    if asset_type == "auto":
+        asset_type = resolve_asset_type(args.symbol)
+
+    if bool(args.channel) ^ bool(args.target):
+        raise ValueError("--channel and --target must be provided together")
+
+    period, interval = resolve_chart_defaults(asset_type, args.period, args.interval)
+    period, interval, auto_note = validate_chart_period_interval(asset_type, period, interval)
+
+    chart_payload = fetch_chart_data(asset_type, args.symbol, period, interval)
+    flags = build_chart_flags(args)
+    indicators = compute_indicators(chart_payload["candles"], flags)
+
+    out_path = Path(args.out).expanduser() if args.out else default_chart_path(chart_payload["symbol"], period, interval, args.chart_type)
+    render_chart_png(
+        chart_payload=chart_payload,
+        indicators=indicators,
+        chart_type=args.chart_type,
+        show_volume=not args.no_volume,
+        show_rsi=flags.get("rsi", False),
+        show_macd=flags.get("macd", False),
+        out_path=out_path,
+        width=float(args.width),
+        height=float(args.height),
+        dpi=int(args.dpi),
+    )
+
+    summary_lines = build_indicator_summary(chart_payload, indicators)
+    if auto_note:
+        summary_lines.append(f"Note: {auto_note}")
+    summary_lines.append(f"Chart Path: {out_path}")
+
+    delivered = False
+    if args.channel and args.target:
+        message = args.message or f"{chart_payload['symbol']} chart generated ({period}/{interval})."
+        delivered = send_media_notification(args.channel, args.target, message, out_path, dry_run=args.dry_run_send)
+
+    if args.json:
+        payload = {
+            "chart": {
+                "path": str(out_path),
+                "asset_type": asset_type,
+                "symbol": chart_payload["symbol"],
+                "period": period,
+                "interval": interval,
+                "source": chart_payload["source"],
+                "as_of": chart_payload["as_of"],
+                "note": auto_note,
+            },
+            "summary": summary_lines,
+            "delivery": {
+                "attempted": bool(args.channel and args.target),
+                "ok": delivered,
+                "dry_run": bool(args.dry_run_send),
+            },
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print("\n".join(summary_lines))
+        print(f"CHART_PATH:{out_path}")
+        if args.channel and args.target:
+            print(f"DELIVERY:{'OK' if delivered else 'FAILED'} channel={args.channel} target={args.target} dry_run={bool(args.dry_run_send)}")
+
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    if not args.all_indicators:
+        args.all_indicators = True
+
+    # Default to candlestick in report mode.
+    args.chart_type = "candlestick"
+    rc = cmd_chart(args)
+    return rc
+
+
+# ----------------------- Parser -----------------------
+
+def add_chart_like_args(parser: argparse.ArgumentParser, include_type: bool = True) -> None:
+    if include_type:
+        parser.add_argument("--type", choices=["auto", "crypto", "stock"], default="auto")
+    parser.add_argument("symbol", help="Asset symbol, e.g. BTC or AAPL")
+    parser.add_argument("--period", default="", help="Chart range period")
+    parser.add_argument("--interval", default="", help="Chart interval")
+    parser.add_argument("--out", default="", help="Output PNG path")
+    parser.add_argument("--width", type=float, default=16.0, help="Figure width")
+    parser.add_argument("--height", type=float, default=9.0, help="Figure height")
+    parser.add_argument("--dpi", type=int, default=160, help="PNG DPI")
+
+    parser.add_argument("--sma", action="store_true", help="Enable SMA20/SMA50")
+    parser.add_argument("--ema", action="store_true", help="Enable EMA12/EMA26")
+    parser.add_argument("--macd", action="store_true", help="Enable MACD(12,26,9)")
+    parser.add_argument("--rsi", action="store_true", help="Enable RSI14")
+    parser.add_argument("--bb", action="store_true", help="Enable Bollinger Bands(20,2)")
+    parser.add_argument("--vol-ma", action="store_true", help="Enable Volume MA20")
+    parser.add_argument("--fib", action="store_true", help="Enable Fibonacci retracement levels")
+    parser.add_argument("--all-indicators", action="store_true", help="Enable all supported indicators")
+    parser.add_argument("--no-volume", action="store_true", help="Hide volume panel")
+
+    parser.add_argument("--channel", default="", help="Delivery channel (optional)")
+    parser.add_argument("--target", default="", help="Delivery target (optional)")
+    parser.add_argument("--message", default="", help="Message text when delivering chart")
+    parser.add_argument("--dry-run-send", action="store_true", help="Print send command without delivery")
+    parser.add_argument("--json", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Crypto/stock alert helper with fallback providers")
+    parser = argparse.ArgumentParser(description="Crypto/stock alert helper with fallback providers and chart generation")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_quote = sub.add_parser("quote", help="Fetch current quote")
@@ -791,6 +1812,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_uninstall = sub.add_parser("uninstall-cron", help="Remove managed crontab entry")
     p_uninstall.set_defaults(func=cmd_uninstall_cron)
+
+    p_chart = sub.add_parser("chart", help="Generate chart image with optional indicators")
+    add_chart_like_args(p_chart, include_type=True)
+    p_chart.add_argument("--chart-type", choices=["candlestick", "line"], default="candlestick")
+    p_chart.set_defaults(func=cmd_chart)
+
+    p_report = sub.add_parser("report", help="Generate chart + full technical indicator summary")
+    add_chart_like_args(p_report, include_type=True)
+    p_report.set_defaults(func=cmd_report, all_indicators=True)
 
     return parser
 
