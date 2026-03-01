@@ -41,6 +41,12 @@ python3 {baseDir}/scripts/market_alert.py add \
 python3 {baseDir}/scripts/market_alert.py add \
   --type stock --symbol AAPL --below 200 \
   --channel telegram --target @your_chat
+
+# BTC > 50000 and notify every check while above threshold
+python3 {baseDir}/scripts/market_alert.py add \
+  --type crypto --symbol BTC --above 50000 \
+  --channel telegram --target @your_chat \
+  --repeat continuous
 ```
 
 ### Check / List / Remove
@@ -133,6 +139,8 @@ Action sequence:
 
 ## Behavior Notes
 
-- Alert is edge-triggered: notify only on false->true crossing.
+- Default mode is `edge`: notify only on false->true crossing.
+- Use `--repeat continuous` to notify every check while condition is true.
 - Duplicate concurrent `check` runs are lock-protected.
+- Cron environments may have minimal PATH; script auto-resolves `openclaw` binary and supports `OPENCLAW_BIN` override.
 - Chart/report requires `matplotlib`; if missing, use venv install.

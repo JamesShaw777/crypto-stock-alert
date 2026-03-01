@@ -20,6 +20,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1139,6 +1140,33 @@ def format_alert_message(alert: dict[str, Any], quote: dict[str, Any]) -> str:
     )
 
 
+def resolve_openclaw_bin() -> str:
+    env_bin = (os.environ.get("OPENCLAW_BIN") or "").strip()
+    if env_bin:
+        return env_bin
+
+    detected = shutil.which("openclaw")
+    if detected:
+        return detected
+
+    candidates = [
+        Path("/usr/local/bin/openclaw"),
+        Path("/usr/bin/openclaw"),
+        Path.home() / ".nvm/versions/node/v25.6.0/bin/openclaw",
+    ]
+
+    nvm_root = Path.home() / ".nvm/versions/node"
+    if nvm_root.exists():
+        for candidate in sorted(nvm_root.glob("v*/bin/openclaw"), reverse=True):
+            candidates.insert(0, candidate)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    return "openclaw"
+
+
 def send_notification(alert: dict[str, Any], message: str, dry_run: bool = False, quiet: bool = False) -> bool:
     channel = (alert.get("channel") or "").strip()
     target = (alert.get("target") or "").strip()
@@ -1148,8 +1176,9 @@ def send_notification(alert: dict[str, Any], message: str, dry_run: bool = False
             print(f"LOCAL_ALERT {alert['id']}: {message}")
         return True
 
+    openclaw_bin = resolve_openclaw_bin()
     cmd = [
-        "openclaw",
+        openclaw_bin,
         "message",
         "send",
         "--channel",
@@ -1165,7 +1194,16 @@ def send_notification(alert: dict[str, Any], message: str, dry_run: bool = False
             print("DRY_RUN send:", " ".join(shlex.quote(part) for part in cmd))
         return True
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    run_env = os.environ.copy()
+    try:
+        openclaw_path = Path(openclaw_bin)
+        if openclaw_path.is_absolute():
+            node_bin_dir = str(openclaw_path.parent)
+            run_env["PATH"] = node_bin_dir + ":" + run_env.get("PATH", "/usr/bin:/bin")
+    except Exception:
+        pass
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
     if proc.returncode == 0:
         if not quiet:
             print(f"DELIVERED {alert['id']} -> {channel}:{target}")
@@ -1183,8 +1221,9 @@ def send_notification(alert: dict[str, Any], message: str, dry_run: bool = False
 
 
 def send_media_notification(channel: str, target: str, message: str, media_path: Path, dry_run: bool = False) -> bool:
+    openclaw_bin = resolve_openclaw_bin()
     cmd = [
-        "openclaw",
+        openclaw_bin,
         "message",
         "send",
         "--channel",
@@ -1200,7 +1239,16 @@ def send_media_notification(channel: str, target: str, message: str, media_path:
         print("DRY_RUN send:", " ".join(shlex.quote(part) for part in cmd))
         return True
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    run_env = os.environ.copy()
+    try:
+        openclaw_path = Path(openclaw_bin)
+        if openclaw_path.is_absolute():
+            node_bin_dir = str(openclaw_path.parent)
+            run_env["PATH"] = node_bin_dir + ":" + run_env.get("PATH", "/usr/bin:/bin")
+    except Exception:
+        pass
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
     if proc.returncode == 0:
         print(f"DELIVERED media -> {channel}:{target}")
         return True
@@ -1404,6 +1452,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         "channel": args.channel or "",
         "target": args.target or "",
         "note": args.note or "",
+        "repeat_mode": args.repeat,
         "enabled": True,
         "created_at": now_iso(),
     }
@@ -1431,13 +1480,14 @@ def cmd_list(args: argparse.Namespace) -> int:
         print("No alerts configured.")
         return 0
 
-    print("ID       TYPE    SYMBOL     RULE             DESTINATION              ENABLED   CREATED_AT")
+    print("ID       TYPE    SYMBOL     RULE             MODE        DESTINATION              ENABLED   CREATED_AT")
     for alert in alerts:
         rule = f"{alert.get('direction')} {alert.get('threshold')}"
         dest = f"{alert.get('channel')}:{alert.get('target')}" if alert.get("channel") and alert.get("target") else "local-log-only"
+        repeat_mode = str(alert.get("repeat_mode", "edge"))
         print(
             f"{str(alert.get('id','')):8} {str(alert.get('asset_type','')):7} {str(alert.get('symbol','')):10} "
-            f"{rule:16} {dest:24} {str(alert.get('enabled', True)):8} {str(alert.get('created_at',''))}"
+            f"{rule:16} {repeat_mode:10} {dest:24} {str(alert.get('enabled', True)):8} {str(alert.get('created_at',''))}"
         )
     return 0
 
@@ -1482,11 +1532,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             try:
                 quote = fetch_price(str(alert.get("asset_type")), str(alert.get("quote_symbol") or alert.get("symbol")))
                 condition_now = evaluate_condition(float(quote["price"]), str(alert.get("direction")), float(alert.get("threshold")))
-                just_triggered = condition_now and not prev_condition
+                repeat_mode = str(alert.get("repeat_mode", "edge")).strip().lower()
+                should_notify = condition_now and (repeat_mode == "continuous" or not prev_condition)
 
                 message = ""
                 delivered = False
-                if just_triggered:
+                if should_notify:
                     message = format_alert_message(alert, quote)
                     delivered = send_notification(alert, message, dry_run=args.dry_run, quiet=args.quiet)
                     triggered += 1
@@ -1498,9 +1549,9 @@ def cmd_check(args: argparse.Namespace) -> int:
                     "last_as_of": quote["as_of"],
                     "last_condition": condition_now,
                     "last_error": "",
-                    "last_triggered_at": now_iso() if just_triggered else previous.get("last_triggered_at", ""),
-                    "last_triggered_price": quote["price"] if just_triggered else previous.get("last_triggered_price"),
-                    "last_delivery_ok": delivered if just_triggered else previous.get("last_delivery_ok"),
+                    "last_triggered_at": now_iso() if should_notify else previous.get("last_triggered_at", ""),
+                    "last_triggered_price": quote["price"] if should_notify else previous.get("last_triggered_price"),
+                    "last_delivery_ok": delivered if should_notify else previous.get("last_delivery_ok"),
                 }
 
                 row = {
@@ -1510,7 +1561,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     "threshold": alert.get("threshold"),
                     "direction": alert.get("direction"),
                     "condition": condition_now,
-                    "triggered": just_triggered,
+                    "triggered": should_notify,
                     "source": quote["source"],
                     "checked_at": quote["checked_at"],
                     "error": "",
@@ -1518,12 +1569,12 @@ def cmd_check(args: argparse.Namespace) -> int:
                 results.append(row)
 
                 if not args.quiet:
-                    state_txt = "TRIGGERED" if just_triggered else ("ARMED" if condition_now else "WAIT")
+                    state_txt = "TRIGGERED" if should_notify else ("ARMED" if condition_now else "WAIT")
                     print(
                         f"{state_txt:9} id={alert_id} symbol={quote['symbol']} price={quote['price']:.6f} "
                         f"rule={alert.get('direction')} {float(alert.get('threshold')):.6f} source={quote['source']}"
                     )
-                    if just_triggered and message:
+                    if should_notify and message:
                         print(f"MESSAGE   {message}")
 
             except Exception as exc:
@@ -1786,6 +1837,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--channel", default="", help="message channel, e.g. telegram")
     p_add.add_argument("--target", default="", help="channel target, e.g. @name or chat id")
     p_add.add_argument("--note", default="")
+    p_add.add_argument("--repeat", choices=["edge", "continuous"], default="edge", help="edge: notify only on crossing, continuous: notify every check while condition is true")
     p_add.add_argument("--json", action="store_true")
     p_add.set_defaults(func=cmd_add)
 
