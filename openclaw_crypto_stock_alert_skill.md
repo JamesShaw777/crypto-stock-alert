@@ -2,11 +2,11 @@
 
 ## 目标范围
 
-本 skill 现在支持两大模块：
+本 skill 现在支持三大模块：
 
 1. 价格告警模块（quote/add/check/cron）
 2. 图表分析模块（chart/report）
-3. 事件提醒模块（event-add/event-list/event-rm/event-check，Phase 2 MACD）
+3. 事件提醒模块（event-add/event-list/event-rm/event-check/event-backtest/event-install-preset，Phase 1-7）
 
 事件提醒扩展的分阶段计划见：
 
@@ -35,22 +35,19 @@
   - Fibonacci 回撤
 - `report` 命令输出图 + 指标摘要
 
-### C. 事件提醒（Phase 2 MACD）
+### C. 事件提醒（Phase 1-7 全量）
 
 - 独立事件规则存储：`event_rules.json`
 - 独立事件状态存储：`event_status.json`
 - 独立锁防并发：`event_check.lock`
-- 当前支持事件：
-  - `macd_golden_cross`
-  - `macd_dead_cross`
-  - `macd_golden_cross_above_zero`
-  - `macd_dead_cross_below_zero`
-  - `macd_zero_cross_up`
-  - `macd_zero_cross_down`
-  - `macd_hist_turn_positive`
-  - `macd_hist_turn_negative`
-  - `macd_hist_expand_up_n`
-  - `macd_hist_expand_down_n`
+- 当前支持事件（共 61 个）：
+  - MACD 家族（含 `golden/dead/zero/hist` + MACD 背离）
+  - RSI 家族（含阈值/穿越 + RSI 背离）
+  - MA 家族（价格与均线穿越 + 多空排列）
+  - Bollinger 家族（触碰/外穿/回归/挤压）
+  - Volume/OBV 家族（量能 spike/dry-up + OBV 交叉/背离）
+  - Breakout 家族（N-bar/Donchian/swing break）
+  - Fibonacci 家族（touch/reject/break）
 - `macd_hist_expand_*` 事件支持 `--hist-expand-bars` 参数
 - 支持 MACD 参数预设：
   - `standard`
@@ -58,6 +55,15 @@
   - `slow_trend`
   - `user_7_10_30`
   - `custom`
+- 支持 preset 一键安装：
+  - `preset_stock_trend`
+  - `preset_stock_reversal`
+  - `preset_crypto_momentum_15m`
+  - `preset_crypto_divergence_15m`
+  - `preset_fib_pullback`
+  - `preset_breakout_follow`
+- 支持 `event-backtest` 历史回放
+- 支持事件通知 `severity` 标签与可选快照附件（`--attach-chart`）
 
 ## 你确认的约束已落地
 
@@ -110,6 +116,12 @@ python3 scripts/market_alert.py event-add --event-type macd_golden_cross --type 
 
 # 事件规则：BTC 15m MACD 柱体连续放大 4 根
 python3 scripts/market_alert.py event-add --event-type macd_hist_expand_up_n --type crypto --symbol BTC --period 5d --interval 15m --macd-profile user_7_10_30 --hist-expand-bars 4
+
+# 预设：BTC 15m 动量事件包（一键安装，幂等）
+python3 scripts/market_alert.py event-install-preset --preset preset_crypto_momentum_15m --type crypto --symbol BTC --period 5d --interval 15m
+
+# 回放：对某条规则做历史回测
+python3 scripts/market_alert.py event-backtest --rule-id <RULE_ID> --max-bars 400
 
 python3 scripts/market_alert.py event-check --dry-run
 python3 scripts/market_alert.py event-list

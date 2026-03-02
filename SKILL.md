@@ -1,6 +1,6 @@
 ---
 name: crypto-stock-alert
-description: 获取 crypto 与股票价格、设置阈值告警、定期检查、并生成K线/技术指标图（SMA/EMA/MACD/RSI/BB/Fibonacci）。Use when users ask for price alerts like "BTC above 50000", stock/crypto chart generation, or indicator-based quick reports.
+description: 获取 crypto 与股票价格、设置阈值告警、定期检查、并生成K线/技术指标图（SMA/EMA/MACD/RSI/BB/Fibonacci）。支持 61 类事件提醒（MACD/RSI/MA/BB/Volume/Breakout/Fib/背离）、preset 一键安装与事件回测。Use when users ask for threshold alerts, indicator/divergence event reminders, preset strategy bundles, historical event backtests, stock/crypto chart generation, or indicator-based quick reports.
 ---
 
 # Crypto Stock Alert
@@ -67,20 +67,18 @@ python3 {baseDir}/scripts/market_alert.py install-cron --minutes 5
 python3 {baseDir}/scripts/market_alert.py uninstall-cron
 ```
 
-## Event Reminder Commands (Phase 2 MACD)
+## Event Reminder Commands (Phase 1-7 Complete)
 
 Current implemented event types:
 
-- `macd_golden_cross`
-- `macd_dead_cross`
-- `macd_golden_cross_above_zero`
-- `macd_dead_cross_below_zero`
-- `macd_zero_cross_up`
-- `macd_zero_cross_down`
-- `macd_hist_turn_positive`
-- `macd_hist_turn_negative`
-- `macd_hist_expand_up_n`
-- `macd_hist_expand_down_n`
+- MACD family: cross/zero/hist + MACD divergence
+- RSI family: threshold/cross + RSI divergence
+- MA family: price-vs-MA crosses + MA alignment
+- Bollinger family: touch/outside/re-enter/squeeze
+- Volume family: spike/dry-up + OBV MA cross/divergence
+- Breakout family: N-bar, Donchian, swing break
+- Fibonacci family: touch/reject/break at key retracement levels
+- Total event types: `61`
 
 ### Add Event Rule
 
@@ -110,6 +108,24 @@ python3 {baseDir}/scripts/market_alert.py event-add \
   --period 5d --interval 15m \
   --macd-profile user_7_10_30 \
   --hist-expand-bars 4
+
+# RSI divergence with explicit pivot params
+python3 {baseDir}/scripts/market_alert.py event-add \
+  --event-type rsi_regular_bull_div \
+  --type crypto --symbol BTC \
+  --period 5d --interval 15m \
+  --pivot-left 3 --pivot-right 3 \
+  --min-pivot-gap 5 --max-pivot-gap 120 \
+  --min-price-delta-pct 0.3 --min-indicator-delta 0.1 \
+  --dedup-window-bars 20
+
+# Attach snapshot and severity tag
+python3 {baseDir}/scripts/market_alert.py event-add \
+  --event-type breakout_n_bar_high \
+  --type crypto --symbol BTC \
+  --period 5d --interval 15m \
+  --attach-chart \
+  --severity critical
 ```
 
 ### Check / List / Remove Event Rules
@@ -118,7 +134,17 @@ python3 {baseDir}/scripts/market_alert.py event-add \
 python3 {baseDir}/scripts/market_alert.py event-list
 python3 {baseDir}/scripts/market_alert.py event-check --dry-run
 python3 {baseDir}/scripts/market_alert.py event-check
+python3 {baseDir}/scripts/market_alert.py event-backtest --rule-id <rule_id> --max-bars 400
 python3 {baseDir}/scripts/market_alert.py event-rm <rule_id>
+```
+
+### Install Event Preset Bundles
+
+```bash
+python3 {baseDir}/scripts/market_alert.py event-install-preset \
+  --preset preset_crypto_momentum_15m \
+  --type crypto --symbol BTC \
+  --period 5d --interval 15m
 ```
 
 ## Chart Generation
@@ -203,18 +229,31 @@ Action sequence:
 2. Run immediate dry-run: `event-check --dry-run`
 3. If recurring monitoring is needed, schedule `event-check` periodically
 
+When user says:
+
+- "直接给我装一套BTC 15m动量事件"
+
+Action sequence:
+
+1. Install preset bundle: `event-install-preset --preset preset_crypto_momentum_15m --type crypto --symbol BTC --period 5d --interval 15m`
+2. Run quick validation: `event-check --dry-run`
+3. Optional historical replay: `event-backtest --rule-id <id> --max-bars 400`
+
 ## Behavior Notes
 
 - Default mode is `edge`: notify only on false->true crossing.
 - Use `--repeat continuous` to notify every check while condition is true.
 - Duplicate concurrent `check` runs are lock-protected.
 - `event-check` uses separate lock protection to avoid duplicate event triggers.
+- `event-backtest` provides deterministic historical replay for one saved event rule.
+- `event-install-preset` installs event bundles idempotently.
+- Event notifications support standardized severity tags and optional chart snapshots.
 - Cron environments may have minimal PATH; script auto-resolves `openclaw` binary and supports `OPENCLAW_BIN` override.
 - Chart/report requires `matplotlib`; if missing, use venv install.
 
 ## Event Reminder Roadmap
 
-For phased implementation of advanced event reminders (MACD/RSI/MA/BB/Volume/Fibonacci/divergence), track:
+For full rollout status and completion checklist of advanced event reminders, track:
 
 - `docs/EVENT_ALERTS_TODO.md`
 

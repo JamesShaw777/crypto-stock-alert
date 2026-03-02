@@ -80,152 +80,152 @@ Status: `completed`
 
 Acceptance Criteria:
 
-- [ ] Events can be backtested on historical candles deterministically
+- [x] Events can be backtested on historical candles deterministically
 - [x] Live check outputs include event context and indicator values
 
 ### Phase 3: RSI + MA + Bollinger + Volume Events
 
-Status: `pending`
+Status: `completed`
 
 RSI:
 
-- [ ] `rsi_cross_30_up`
-- [ ] `rsi_cross_70_down`
-- [ ] `rsi_enter_overbought`
-- [ ] `rsi_enter_oversold`
-- [ ] `rsi_cross_50_up`
-- [ ] `rsi_cross_50_down`
+- [x] `rsi_cross_30_up`
+- [x] `rsi_cross_70_down`
+- [x] `rsi_enter_overbought`
+- [x] `rsi_enter_oversold`
+- [x] `rsi_cross_50_up`
+- [x] `rsi_cross_50_down`
 
 Moving Average / Trend:
 
-- [ ] `price_cross_sma20_up`
-- [ ] `price_cross_sma20_down`
-- [ ] `price_cross_ema20_up`
-- [ ] `price_cross_ema20_down`
-- [ ] `ema20_cross_ema50_up`
-- [ ] `ema20_cross_ema50_down`
-- [ ] `ma_bull_alignment`
-- [ ] `ma_bear_alignment`
+- [x] `price_cross_sma20_up`
+- [x] `price_cross_sma20_down`
+- [x] `price_cross_ema20_up`
+- [x] `price_cross_ema20_down`
+- [x] `ema20_cross_ema50_up`
+- [x] `ema20_cross_ema50_down`
+- [x] `ma_bull_alignment`
+- [x] `ma_bear_alignment`
 
 Bollinger:
 
-- [ ] `bb_touch_upper`
-- [ ] `bb_touch_lower`
-- [ ] `bb_close_outside_upper`
-- [ ] `bb_close_outside_lower`
-- [ ] `bb_reenter_from_upper`
-- [ ] `bb_reenter_from_lower`
-- [ ] `bb_squeeze_start`
-- [ ] `bb_squeeze_breakout_up`
-- [ ] `bb_squeeze_breakout_down`
+- [x] `bb_touch_upper`
+- [x] `bb_touch_lower`
+- [x] `bb_close_outside_upper`
+- [x] `bb_close_outside_lower`
+- [x] `bb_reenter_from_upper`
+- [x] `bb_reenter_from_lower`
+- [x] `bb_squeeze_start`
+- [x] `bb_squeeze_breakout_up`
+- [x] `bb_squeeze_breakout_down`
 
 Volume:
 
-- [ ] `volume_spike_up`
-- [ ] `volume_spike_down`
-- [ ] `volume_dry_up`
-- [ ] `obv_cross_ma_up`
-- [ ] `obv_cross_ma_down`
+- [x] `volume_spike_up`
+- [x] `volume_spike_down`
+- [x] `volume_dry_up`
+- [x] `obv_cross_ma_up`
+- [x] `obv_cross_ma_down`
 
 Acceptance Criteria:
 
-- [ ] Each event has deterministic trigger definition and parameter validation
-- [ ] Event-check output explains why trigger happened
+- [x] Each event has deterministic trigger definition and parameter validation
+- [x] Event-check output explains why trigger happened
 
 ### Phase 4: Breakout + Fibonacci Events
 
-Status: `pending`
+Status: `completed`
 
 Breakout/Structure:
 
-- [ ] `breakout_n_bar_high`
-- [ ] `breakdown_n_bar_low`
-- [ ] `donchian_breakout_up`
-- [ ] `donchian_breakout_down`
-- [ ] `swing_high_break`
-- [ ] `swing_low_break`
+- [x] `breakout_n_bar_high`
+- [x] `breakdown_n_bar_low`
+- [x] `donchian_breakout_up`
+- [x] `donchian_breakout_down`
+- [x] `swing_high_break`
+- [x] `swing_low_break`
 
 Fibonacci:
 
-- [ ] `fib_touch_0_382`
-- [ ] `fib_touch_0_5`
-- [ ] `fib_touch_0_618`
-- [ ] `fib_reject_0_618_up`
-- [ ] `fib_reject_0_618_down`
-- [ ] `fib_break_0_618_up`
-- [ ] `fib_break_0_618_down`
+- [x] `fib_touch_0_382`
+- [x] `fib_touch_0_5`
+- [x] `fib_touch_0_618`
+- [x] `fib_reject_0_618_up`
+- [x] `fib_reject_0_618_down`
+- [x] `fib_break_0_618_up`
+- [x] `fib_break_0_618_down`
 
 Acceptance Criteria:
 
-- [ ] Pivot/level anchors are explicit and reproducible
-- [ ] Triggers include level, direction, and confirmation context
+- [x] Pivot/level anchors are explicit and reproducible
+- [x] Triggers include level, direction, and confirmation context
 
 ### Phase 5: Divergence Events
 
-Status: `pending`
+Status: `completed`
 
 Regular divergence:
 
-- [ ] `rsi_regular_bull_div`
-- [ ] `rsi_regular_bear_div`
-- [ ] `macd_regular_bull_div`
-- [ ] `macd_regular_bear_div`
-- [ ] `obv_regular_bull_div`
-- [ ] `obv_regular_bear_div`
+- [x] `rsi_regular_bull_div`
+- [x] `rsi_regular_bear_div`
+- [x] `macd_regular_bull_div`
+- [x] `macd_regular_bear_div`
+- [x] `obv_regular_bull_div`
+- [x] `obv_regular_bear_div`
 
 Hidden divergence:
 
-- [ ] `rsi_hidden_bull_div`
-- [ ] `rsi_hidden_bear_div`
-- [ ] `macd_hidden_bull_div`
-- [ ] `macd_hidden_bear_div`
+- [x] `rsi_hidden_bull_div`
+- [x] `rsi_hidden_bear_div`
+- [x] `macd_hidden_bull_div`
+- [x] `macd_hidden_bear_div`
 
 Divergence engine parameters:
 
-- [ ] `pivot_left`
-- [ ] `pivot_right`
-- [ ] `min_pivot_gap`
-- [ ] `max_pivot_gap`
-- [ ] `min_price_delta_pct`
-- [ ] `min_indicator_delta`
-- [ ] `confirm_bars`
-- [ ] `dedup_window_bars`
+- [x] `pivot_left`
+- [x] `pivot_right`
+- [x] `min_pivot_gap`
+- [x] `max_pivot_gap`
+- [x] `min_price_delta_pct`
+- [x] `min_indicator_delta`
+- [x] `confirm_bars`
+- [x] `dedup_window_bars`
 
 Acceptance Criteria:
 
-- [ ] Divergence detection is deterministic for same OHLCV input
-- [ ] False-positive control parameters are configurable per rule
+- [x] Divergence detection is deterministic for same OHLCV input
+- [x] False-positive control parameters are configurable per rule
 
 ## Presets and UX
 
 ### Phase 6: Preset Bundles
 
-Status: `pending`
+Status: `completed`
 
-- [ ] `preset_stock_trend`
-- [ ] `preset_stock_reversal`
-- [ ] `preset_crypto_momentum_15m`
-- [ ] `preset_crypto_divergence_15m`
-- [ ] `preset_fib_pullback`
-- [ ] `preset_breakout_follow`
+- [x] `preset_stock_trend`
+- [x] `preset_stock_reversal`
+- [x] `preset_crypto_momentum_15m`
+- [x] `preset_crypto_divergence_15m`
+- [x] `preset_fib_pullback`
+- [x] `preset_breakout_follow`
 
 Acceptance Criteria:
 
-- [ ] One command can install a bundle of event rules
-- [ ] Bundle install is idempotent
+- [x] One command can install a bundle of event rules
+- [x] Bundle install is idempotent
 
 ### Phase 7: Delivery and Message Templates
 
-Status: `pending`
+Status: `completed`
 
-- [ ] Add standardized event message templates with parameter details
-- [ ] Add chart snapshot attach option for event triggers
-- [ ] Add per-event severity tag (`info`/`warning`/`critical`)
+- [x] Add standardized event message templates with parameter details
+- [x] Add chart snapshot attach option for event triggers
+- [x] Add per-event severity tag (`info`/`warning`/`critical`)
 
 Acceptance Criteria:
 
-- [ ] Event notifications are concise and context-complete
-- [ ] Optional chart attachment is reliable
+- [x] Event notifications are concise and context-complete
+- [x] Optional chart attachment is reliable
 
 ## Constraints Already Confirmed
 
@@ -234,10 +234,10 @@ Acceptance Criteria:
 
 ## Current Priority Queue
 
-1. Phase 3 (RSI/MA/BB/Volume)
-2. Phase 5 (divergence)
-3. Phase 4 and 6/7 (breakout/fib bundles + delivery polish)
-4. Phase 2 backtest command support (historical deterministic replay)
+1. Regression coverage expansion (unit/integration tests for each event family)
+2. Runtime optimization (shared candle cache across rules in one `event-check` pass)
+3. Optional rule import/export helpers
+4. Optional visualization for backtest trigger timeline
 
 ## Change Log (Implementation Progress)
 
@@ -246,3 +246,9 @@ Acceptance Criteria:
 - 2026-03-02: Started Phase 2 with MACD profiles + `macd_golden_cross` and `macd_dead_cross`.
 - 2026-03-02: Completed remaining Phase 2 MACD events (`above/below zero`, `zero cross`, `hist turn`, `hist expand`).
 - 2026-03-02: Added `--hist-expand-bars` and richer MACD event messages with indicator context.
+- 2026-03-02: Completed Phase 3 event families (`RSI`, `MA`, `Bollinger`, `Volume/OBV`).
+- 2026-03-02: Completed Phase 4 event families (`Breakout`, `Fibonacci`).
+- 2026-03-02: Completed Phase 5 divergence families (regular + hidden; RSI/MACD/OBV support).
+- 2026-03-02: Completed Phase 6 via `event-install-preset` (idempotent preset bundle installs).
+- 2026-03-02: Completed Phase 7 via standardized severity-tagged messages and optional snapshot attachments (`--attach-chart`).
+- 2026-03-02: Added deterministic rule replay command `event-backtest`.

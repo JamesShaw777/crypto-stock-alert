@@ -4,7 +4,7 @@ OpenClaw skill + Python CLI for:
 
 - Crypto and stock price lookup
 - Threshold alerts (`above` / `below`)
-- Event-based reminders (Phase 2 MACD set)
+- Event-based reminders (Phase 1-7 completed)
 - Scheduled checks via cron
 - Chart image generation (candlestick/line)
 - Technical indicators (SMA, EMA, MACD, RSI, Bollinger Bands, Fibonacci)
@@ -38,20 +38,26 @@ Event reminder expansion (MACD/RSI/MA/BB/Volume/Fibonacci/divergence) is tracked
 
 - `docs/EVENT_ALERTS_TODO.md`
 
-All new event features are implemented in phases, and docs are updated after each phase.
+All event phases are now completed (Phase 1-7), and follow-up improvements are tracked in the same TODO file.
 
-Currently implemented event types (Phase 2):
+Current event engine coverage:
 
-- `macd_golden_cross`
-- `macd_dead_cross`
-- `macd_golden_cross_above_zero`
-- `macd_dead_cross_below_zero`
-- `macd_zero_cross_up`
-- `macd_zero_cross_down`
-- `macd_hist_turn_positive`
-- `macd_hist_turn_negative`
-- `macd_hist_expand_up_n`
-- `macd_hist_expand_down_n`
+- MACD events (10 types)
+- RSI events (6 types)
+- MA/Trend events (8 types)
+- Bollinger events (9 types)
+- Volume/OBV events (5 types)
+- Breakout/structure events (6 types)
+- Fibonacci events (7 types)
+- Divergence events (10 types)
+- Total implemented event types: `61`
+
+Additional event tooling:
+
+- `event-backtest` for deterministic historical replay
+- `event-install-preset` for idempotent bundle installs
+- Per-rule severity (`info`/`warning`/`critical` via `--severity`)
+- Optional chart snapshot delivery on trigger (`--attach-chart`)
 
 ## Requirements
 
@@ -109,7 +115,7 @@ python3 scripts/market_alert.py install-cron --minutes 5
 python3 scripts/market_alert.py uninstall-cron
 ```
 
-### 5) Add event reminder rules (Phase 2 MACD)
+### 5) Add event reminder rules (all event families)
 
 ```bash
 # MACD golden cross, crypto 15m, using your requested 7/10/30 profile
@@ -135,6 +141,29 @@ python3 scripts/market_alert.py event-add \
   --period 5d --interval 15m \
   --macd-profile user_7_10_30 \
   --hist-expand-bars 4
+
+# RSI crossover event
+python3 scripts/market_alert.py event-add \
+  --event-type rsi_cross_50_up \
+  --type crypto --symbol BTC \
+  --period 5d --interval 15m
+
+# Divergence event with configurable pivot params
+python3 scripts/market_alert.py event-add \
+  --event-type rsi_regular_bull_div \
+  --type crypto --symbol BTC \
+  --period 5d --interval 15m \
+  --pivot-left 3 --pivot-right 3 \
+  --min-pivot-gap 5 --max-pivot-gap 120 \
+  --min-price-delta-pct 0.3 --min-indicator-delta 0.1 \
+  --dedup-window-bars 20
+
+# Trigger with chart snapshot attachment
+python3 scripts/market_alert.py event-add \
+  --event-type breakout_n_bar_high \
+  --type crypto --symbol BTC \
+  --period 5d --interval 15m \
+  --attach-chart --severity critical
 ```
 
 ### 6) Check/list/remove event rules
@@ -142,7 +171,17 @@ python3 scripts/market_alert.py event-add \
 ```bash
 python3 scripts/market_alert.py event-list
 python3 scripts/market_alert.py event-check --dry-run
+python3 scripts/market_alert.py event-backtest --rule-id <RULE_ID> --max-bars 400
 python3 scripts/market_alert.py event-rm <RULE_ID>
+```
+
+### 6.1) Install event preset bundles (idempotent)
+
+```bash
+python3 scripts/market_alert.py event-install-preset \
+  --preset preset_crypto_momentum_15m \
+  --type crypto --symbol BTC \
+  --period 5d --interval 15m
 ```
 
 ### 7) Generate charts
@@ -207,31 +246,39 @@ python3 scripts/market_alert.py check [--dry-run] [--quiet] [--json] [--fail-on-
 
 ```bash
 python3 scripts/market_alert.py event-add \
-  --event-type <MACD_EVENT_TYPE> \
+  --event-type <EVENT_TYPE> \
   --type auto|crypto|stock \
   --symbol <SYMBOL> \
   [--period PERIOD] [--interval INTERVAL] \
   [--confirm-bars N] \
   [--hist-expand-bars N] \
+  [--lookback-bars N] \
+  [--bb-width-threshold X] \
+  [--volume-spike-multiplier X] [--volume-dry-threshold X] \
+  [--fib-anchor-bars N] [--fib-touch-tolerance X] \
+  [--pivot-left N] [--pivot-right N] \
+  [--min-pivot-gap N] [--max-pivot-gap N] \
+  [--min-price-delta-pct X] [--min-indicator-delta X] \
+  [--dedup-window-bars N] \
   [--cooldown-minutes N] \
   [--dedup-mode cross_once|continuous] \
   [--macd-profile auto|standard|fast_crypto|slow_trend|user_7_10_30|custom] \
   [--macd-fast N --macd-slow N --macd-signal N] \
+  [--severity auto|info|warning|critical] \
+  [--attach-chart] [--snapshot-chart-type candlestick|line] \
+  [--snapshot-width N] [--snapshot-height N] [--snapshot-dpi N] \
   [--channel CHANNEL --target TARGET] [--note TEXT] [--json]
 ```
 
-`<MACD_EVENT_TYPE>` choices:
+`<EVENT_TYPE>` families:
 
-- `macd_golden_cross`
-- `macd_dead_cross`
-- `macd_golden_cross_above_zero`
-- `macd_dead_cross_below_zero`
-- `macd_zero_cross_up`
-- `macd_zero_cross_down`
-- `macd_hist_turn_positive`
-- `macd_hist_turn_negative`
-- `macd_hist_expand_up_n`
-- `macd_hist_expand_down_n`
+- MACD: `macd_*` (cross/zero/hist + divergence)
+- RSI: `rsi_*` (threshold/cross + divergence)
+- MA/Trend: `price_cross_*`, `ema20_cross_ema50_*`, `ma_*_alignment`
+- Bollinger: `bb_touch_*`, `bb_close_outside_*`, `bb_reenter_*`, `bb_squeeze_*`
+- Volume/OBV: `volume_*`, `obv_cross_ma_*`, `obv_regular_*_div`
+- Breakout: `breakout_n_bar_high`, `breakdown_n_bar_low`, `donchian_*`, `swing_*_break`
+- Fibonacci: `fib_touch_*`, `fib_reject_*`, `fib_break_*`
 
 ### `event-list`
 
@@ -249,6 +296,24 @@ python3 scripts/market_alert.py event-rm <RULE_ID>
 
 ```bash
 python3 scripts/market_alert.py event-check [--dry-run] [--quiet] [--json] [--fail-on-error]
+```
+
+### `event-backtest`
+
+```bash
+python3 scripts/market_alert.py event-backtest --rule-id <RULE_ID> [--max-bars N] [--json]
+```
+
+### `event-install-preset`
+
+```bash
+python3 scripts/market_alert.py event-install-preset \
+  --preset preset_stock_trend|preset_stock_reversal|preset_crypto_momentum_15m|\
+preset_crypto_divergence_15m|preset_fib_pullback|preset_breakout_follow \
+  --type auto|crypto|stock \
+  --symbol <SYMBOL> \
+  [--period PERIOD] [--interval INTERVAL] \
+  [preset/event parameters...]
 ```
 
 ### `install-cron`
@@ -353,6 +418,10 @@ Event reminders follow rule-level dedup/cooldown settings:
 - `dedup_mode=cross_once`: trigger on new condition crossing only
 - `dedup_mode=continuous`: trigger while condition remains true (respecting cooldown)
 - `cooldown_minutes`: minimum spacing between repeated event notifications
+- `event-backtest`: replay one saved rule across historical candles deterministically
+- `event-install-preset`: install preset bundles idempotently
+- `--severity`: tag event message as `info`/`warning`/`critical` (or `auto`)
+- `--attach-chart`: generate and send chart snapshot together with event message
 
 `event-check` is lock-protected (`event_check.lock`) to avoid duplicate triggers under concurrent execution.
 
@@ -412,6 +481,16 @@ Execution mapping:
 1. `event-add --event-type macd_golden_cross --type crypto --symbol BTC --period 5d --interval 15m --macd-profile user_7_10_30`
 2. `event-check --dry-run`
 3. Schedule periodic checks by running `event-check` via cron or heartbeat workflow
+
+Example request:
+
+> "Install a BTC 15m momentum event pack, then backtest one rule."
+
+Execution mapping:
+
+1. `event-install-preset --preset preset_crypto_momentum_15m --type crypto --symbol BTC --period 5d --interval 15m`
+2. `event-list` and pick a rule id
+3. `event-backtest --rule-id <RULE_ID> --max-bars 400`
 
 ## Troubleshooting
 

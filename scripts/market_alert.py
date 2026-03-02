@@ -111,7 +111,7 @@ COINGECKO_SYMBOL_TO_ID = {
 
 FIB_RATIOS = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
 
-EVENT_TYPE_CHOICES = (
+MACD_EVENT_TYPES = (
     "macd_golden_cross",
     "macd_dead_cross",
     "macd_golden_cross_above_zero",
@@ -123,7 +123,94 @@ EVENT_TYPE_CHOICES = (
     "macd_hist_expand_up_n",
     "macd_hist_expand_down_n",
 )
+RSI_EVENT_TYPES = (
+    "rsi_cross_30_up",
+    "rsi_cross_70_down",
+    "rsi_enter_overbought",
+    "rsi_enter_oversold",
+    "rsi_cross_50_up",
+    "rsi_cross_50_down",
+)
+MA_EVENT_TYPES = (
+    "price_cross_sma20_up",
+    "price_cross_sma20_down",
+    "price_cross_ema20_up",
+    "price_cross_ema20_down",
+    "ema20_cross_ema50_up",
+    "ema20_cross_ema50_down",
+    "ma_bull_alignment",
+    "ma_bear_alignment",
+)
+BB_EVENT_TYPES = (
+    "bb_touch_upper",
+    "bb_touch_lower",
+    "bb_close_outside_upper",
+    "bb_close_outside_lower",
+    "bb_reenter_from_upper",
+    "bb_reenter_from_lower",
+    "bb_squeeze_start",
+    "bb_squeeze_breakout_up",
+    "bb_squeeze_breakout_down",
+)
+VOLUME_EVENT_TYPES = (
+    "volume_spike_up",
+    "volume_spike_down",
+    "volume_dry_up",
+    "obv_cross_ma_up",
+    "obv_cross_ma_down",
+)
+BREAKOUT_EVENT_TYPES = (
+    "breakout_n_bar_high",
+    "breakdown_n_bar_low",
+    "donchian_breakout_up",
+    "donchian_breakout_down",
+    "swing_high_break",
+    "swing_low_break",
+)
+FIB_EVENT_TYPES = (
+    "fib_touch_0_382",
+    "fib_touch_0_5",
+    "fib_touch_0_618",
+    "fib_reject_0_618_up",
+    "fib_reject_0_618_down",
+    "fib_break_0_618_up",
+    "fib_break_0_618_down",
+)
+DIVERGENCE_EVENT_TYPES = (
+    "rsi_regular_bull_div",
+    "rsi_regular_bear_div",
+    "macd_regular_bull_div",
+    "macd_regular_bear_div",
+    "obv_regular_bull_div",
+    "obv_regular_bear_div",
+    "rsi_hidden_bull_div",
+    "rsi_hidden_bear_div",
+    "macd_hidden_bull_div",
+    "macd_hidden_bear_div",
+)
+
+EVENT_TYPE_CHOICES = (
+    MACD_EVENT_TYPES
+    + RSI_EVENT_TYPES
+    + MA_EVENT_TYPES
+    + BB_EVENT_TYPES
+    + VOLUME_EVENT_TYPES
+    + BREAKOUT_EVENT_TYPES
+    + FIB_EVENT_TYPES
+    + DIVERGENCE_EVENT_TYPES
+)
+
 MACD_HIST_EXPAND_EVENT_TYPES = ("macd_hist_expand_up_n", "macd_hist_expand_down_n")
+MACD_EVENT_WITH_PROFILE_TYPES = tuple(t for t in EVENT_TYPE_CHOICES if t.startswith("macd_"))
+EVENT_SEVERITY_CHOICES = ("auto", "info", "warning", "critical")
+EVENT_PRESET_CHOICES = (
+    "preset_stock_trend",
+    "preset_stock_reversal",
+    "preset_crypto_momentum_15m",
+    "preset_crypto_divergence_15m",
+    "preset_fib_pullback",
+    "preset_breakout_follow",
+)
 
 MACD_PROFILES: dict[str, tuple[int, int, int]] = {
     "standard": (12, 26, 9),
@@ -1538,6 +1625,227 @@ def extract_macd_params(rule: dict[str, Any]) -> tuple[int, int, int, str]:
     return fast, slow, signal, profile
 
 
+def obv_series(closes: list[float], volumes: list[float]) -> list[float]:
+    if not closes:
+        return []
+    out = [0.0]
+    for idx in range(1, len(closes)):
+        prev = out[-1]
+        if closes[idx] > closes[idx - 1]:
+            out.append(prev + volumes[idx])
+        elif closes[idx] < closes[idx - 1]:
+            out.append(prev - volumes[idx])
+        else:
+            out.append(prev)
+    return out
+
+
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in ("1", "true", "yes", "y", "on"):
+            return True
+        if token in ("0", "false", "no", "n", "off", ""):
+            return False
+    return default
+
+
+def parse_int(value: Any, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+    try:
+        out = int(value)
+    except Exception:
+        out = int(default)
+    if min_value is not None and out < min_value:
+        out = min_value
+    if max_value is not None and out > max_value:
+        out = max_value
+    return out
+
+
+def parse_float(value: Any, default: float, min_value: float | None = None, max_value: float | None = None) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        out = float(default)
+    if min_value is not None and out < min_value:
+        out = min_value
+    if max_value is not None and out > max_value:
+        out = max_value
+    return out
+
+
+def normalize_event_params_for_compare(event_type: str, raw_params: Any) -> dict[str, Any]:
+    params = raw_params if isinstance(raw_params, dict) else {}
+    out: dict[str, Any] = {}
+
+    severity = str(params.get("severity", "auto")).strip().lower()
+    if severity not in EVENT_SEVERITY_CHOICES:
+        severity = "auto"
+    out["severity"] = severity
+
+    attach_chart = parse_bool(params.get("attach_chart", False), default=False)
+    out["attach_chart"] = attach_chart
+    if attach_chart:
+        chart_type = str(params.get("snapshot_chart_type", "candlestick")).strip().lower()
+        if chart_type not in ("candlestick", "line"):
+            chart_type = "candlestick"
+        out["snapshot_chart_type"] = chart_type
+        out["snapshot_width"] = parse_float(params.get("snapshot_width", 14.0), 14.0, min_value=6.0)
+        out["snapshot_height"] = parse_float(params.get("snapshot_height", 8.0), 8.0, min_value=4.0)
+        out["snapshot_dpi"] = parse_int(params.get("snapshot_dpi", 150), 150, min_value=80, max_value=400)
+
+    if event_type in MACD_EVENT_WITH_PROFILE_TYPES:
+        try:
+            fast = parse_int(params.get("macd_fast", 12), 12, min_value=1)
+            slow = parse_int(params.get("macd_slow", 26), 26, min_value=2)
+            signal = parse_int(params.get("macd_signal", 9), 9, min_value=1)
+            if fast >= slow:
+                fast, slow, signal = 12, 26, 9
+            profile = str(params.get("macd_profile", "standard")).strip().lower() or "standard"
+            if profile not in ("standard", "fast_crypto", "slow_trend", "user_7_10_30", "custom"):
+                profile = "standard"
+        except Exception:
+            fast, slow, signal, profile = 12, 26, 9, "standard"
+        out["macd_profile"] = profile
+        out["macd_fast"] = int(fast)
+        out["macd_slow"] = int(slow)
+        out["macd_signal"] = int(signal)
+
+    if event_type in MACD_HIST_EXPAND_EVENT_TYPES:
+        out["hist_expand_bars"] = parse_int(params.get("hist_expand_bars", 3), 3, min_value=2)
+
+    if event_type in (
+        "breakout_n_bar_high",
+        "breakdown_n_bar_low",
+        "donchian_breakout_up",
+        "donchian_breakout_down",
+        "bb_squeeze_breakout_up",
+        "bb_squeeze_breakout_down",
+        "volume_spike_up",
+        "volume_spike_down",
+        "volume_dry_up",
+    ):
+        out["lookback_bars"] = parse_int(params.get("lookback_bars", 20), 20, min_value=2, max_value=300)
+
+    if event_type in ("bb_squeeze_start", "bb_squeeze_breakout_up", "bb_squeeze_breakout_down"):
+        out["bb_width_threshold"] = parse_float(params.get("bb_width_threshold", 0.06), 0.06, min_value=0.005, max_value=1.0)
+
+    if event_type in ("volume_spike_up", "volume_spike_down"):
+        out["volume_spike_multiplier"] = parse_float(
+            params.get("volume_spike_multiplier", 1.8), 1.8, min_value=1.0, max_value=20.0
+        )
+
+    if event_type == "volume_dry_up":
+        out["volume_dry_threshold"] = parse_float(
+            params.get("volume_dry_threshold", 0.6), 0.6, min_value=0.05, max_value=1.0
+        )
+
+    if event_type in BREAKOUT_EVENT_TYPES:
+        out["pivot_left"] = parse_int(params.get("pivot_left", 3), 3, min_value=1, max_value=20)
+        out["pivot_right"] = parse_int(params.get("pivot_right", 3), 3, min_value=1, max_value=20)
+
+    if event_type in FIB_EVENT_TYPES:
+        out["fib_anchor_bars"] = parse_int(params.get("fib_anchor_bars", 120), 120, min_value=20, max_value=1000)
+        out["fib_touch_tolerance"] = parse_float(
+            params.get("fib_touch_tolerance", 0.002), 0.002, min_value=0.0, max_value=0.05
+        )
+
+    if event_type in DIVERGENCE_EVENT_TYPES:
+        out["pivot_left"] = parse_int(params.get("pivot_left", 3), 3, min_value=1, max_value=20)
+        out["pivot_right"] = parse_int(params.get("pivot_right", 3), 3, min_value=1, max_value=20)
+        out["min_pivot_gap"] = parse_int(params.get("min_pivot_gap", 5), 5, min_value=1, max_value=200)
+        out["max_pivot_gap"] = parse_int(params.get("max_pivot_gap", 120), 120, min_value=2, max_value=800)
+        if out["max_pivot_gap"] < out["min_pivot_gap"]:
+            out["max_pivot_gap"] = out["min_pivot_gap"]
+        out["min_price_delta_pct"] = parse_float(
+            params.get("min_price_delta_pct", 0.3), 0.3, min_value=0.0, max_value=100.0
+        )
+        out["min_indicator_delta"] = parse_float(
+            params.get("min_indicator_delta", 0.1), 0.1, min_value=0.0, max_value=1000000.0
+        )
+        out["dedup_window_bars"] = parse_int(params.get("dedup_window_bars", 20), 20, min_value=2, max_value=400)
+
+    return out
+
+
+def resolve_event_severity(event_type: str, params: dict[str, Any]) -> str:
+    chosen = str(params.get("severity", "auto")).strip().lower()
+    if chosen in ("info", "warning", "critical"):
+        return chosen
+
+    if event_type in (
+        "breakout_n_bar_high",
+        "breakdown_n_bar_low",
+        "donchian_breakout_up",
+        "donchian_breakout_down",
+        "fib_break_0_618_up",
+        "fib_break_0_618_down",
+    ):
+        return "critical"
+    if (
+        "bear" in event_type
+        or "dead" in event_type
+        or event_type.endswith("_down")
+        or event_type.startswith("bb_close_outside")
+        or "div" in event_type
+    ):
+        return "warning"
+    return "info"
+
+
+def find_pivot_indices(series: list[float | None], left: int, right: int, kind: str) -> list[int]:
+    n = len(series)
+    out: list[int] = []
+    if left < 1 or right < 1 or n <= left + right:
+        return out
+    for idx in range(left, n - right):
+        value = series[idx]
+        if value is None:
+            continue
+        pivot_ok = True
+        for probe in range(idx - left, idx + right + 1):
+            if probe == idx:
+                continue
+            other = series[probe]
+            if other is None:
+                pivot_ok = False
+                break
+            if kind == "high":
+                if float(other) >= float(value):
+                    pivot_ok = False
+                    break
+            else:
+                if float(other) <= float(value):
+                    pivot_ok = False
+                    break
+        if pivot_ok:
+            out.append(idx)
+    return out
+
+
+def find_recent_pivot_pair(indices: list[int], min_gap: int, max_gap: int, max_age: int, last_idx: int) -> tuple[int, int] | None:
+    if len(indices) < 2:
+        return None
+
+    for j in range(len(indices) - 1, 0, -1):
+        p2 = indices[j]
+        if last_idx - p2 > max_age:
+            continue
+        for i in range(j - 1, -1, -1):
+            p1 = indices[i]
+            gap = p2 - p1
+            if gap < min_gap:
+                continue
+            if gap > max_gap:
+                break
+            return p1, p2
+    return None
+
+
 def evaluate_macd_cross_event(
     event_type: str,
     macd_line: list[float | None],
@@ -1645,6 +1953,851 @@ def evaluate_macd_cross_event(
     return condition, detail
 
 
+def evaluate_rsi_event(event_type: str, rsi_line: list[float | None], confirm_bars: int) -> tuple[bool, dict[str, Any]]:
+    confirm_bars = max(1, int(confirm_bars))
+    n = len(rsi_line)
+    start = n - confirm_bars
+    pre = start - 1
+    detail: dict[str, Any] = {"confirm_bars": confirm_bars}
+
+    if pre < 0:
+        detail["reason"] = "not_enough_bars"
+        return False, detail
+    if rsi_line[pre] is None:
+        detail["reason"] = "insufficient_indicator_history"
+        return False, detail
+
+    cur: list[float] = []
+    for idx in range(start, n):
+        value = rsi_line[idx]
+        if value is None:
+            detail["reason"] = "insufficient_indicator_history"
+            return False, detail
+        cur.append(float(value))
+
+    pre_rsi = float(rsi_line[pre])  # type: ignore[arg-type]
+    last_rsi = cur[-1]
+
+    if event_type == "rsi_cross_30_up":
+        condition = pre_rsi <= 30.0 and all(v > 30.0 for v in cur)
+        level = 30.0
+    elif event_type == "rsi_cross_70_down":
+        condition = pre_rsi >= 70.0 and all(v < 70.0 for v in cur)
+        level = 70.0
+    elif event_type == "rsi_enter_overbought":
+        condition = pre_rsi < 70.0 and all(v >= 70.0 for v in cur)
+        level = 70.0
+    elif event_type == "rsi_enter_oversold":
+        condition = pre_rsi > 30.0 and all(v <= 30.0 for v in cur)
+        level = 30.0
+    elif event_type == "rsi_cross_50_up":
+        condition = pre_rsi <= 50.0 and all(v > 50.0 for v in cur)
+        level = 50.0
+    elif event_type == "rsi_cross_50_down":
+        condition = pre_rsi >= 50.0 and all(v < 50.0 for v in cur)
+        level = 50.0
+    else:
+        raise RuntimeError(f"unsupported RSI event type: {event_type}")
+
+    detail.update(
+        {
+            "threshold": level,
+            "pre_rsi": pre_rsi,
+            "last_rsi": last_rsi,
+            "reason": "ok" if condition else "condition_false",
+        }
+    )
+    return condition, detail
+
+
+def evaluate_ma_event(
+    event_type: str,
+    closes: list[float],
+    sma20: list[float | None],
+    sma50: list[float | None],
+    ema20: list[float | None],
+    ema50: list[float | None],
+    confirm_bars: int,
+) -> tuple[bool, dict[str, Any]]:
+    confirm_bars = max(1, int(confirm_bars))
+    n = len(closes)
+    start = n - confirm_bars
+    pre = start - 1
+    detail: dict[str, Any] = {"confirm_bars": confirm_bars}
+    if pre < 0:
+        detail["reason"] = "not_enough_bars"
+        return False, detail
+
+    def need(series: list[float | None], idx: int) -> float:
+        value = series[idx]
+        if value is None:
+            raise RuntimeError("insufficient_indicator_history")
+        return float(value)
+
+    try:
+        pre_close = float(closes[pre])
+        last_close = float(closes[-1])
+        pre_sma20 = need(sma20, pre)
+        pre_sma50 = need(sma50, pre)
+        pre_ema20 = need(ema20, pre)
+        pre_ema50 = need(ema50, pre)
+        cur_sma20 = [need(sma20, idx) for idx in range(start, n)]
+        cur_sma50 = [need(sma50, idx) for idx in range(start, n)]
+        cur_ema20 = [need(ema20, idx) for idx in range(start, n)]
+        cur_ema50 = [need(ema50, idx) for idx in range(start, n)]
+        cur_closes = [float(closes[idx]) for idx in range(start, n)]
+    except RuntimeError:
+        detail["reason"] = "insufficient_indicator_history"
+        return False, detail
+
+    if event_type == "price_cross_sma20_up":
+        condition = pre_close <= pre_sma20 and all(cur_closes[i] > cur_sma20[i] for i in range(len(cur_closes)))
+    elif event_type == "price_cross_sma20_down":
+        condition = pre_close >= pre_sma20 and all(cur_closes[i] < cur_sma20[i] for i in range(len(cur_closes)))
+    elif event_type == "price_cross_ema20_up":
+        condition = pre_close <= pre_ema20 and all(cur_closes[i] > cur_ema20[i] for i in range(len(cur_closes)))
+    elif event_type == "price_cross_ema20_down":
+        condition = pre_close >= pre_ema20 and all(cur_closes[i] < cur_ema20[i] for i in range(len(cur_closes)))
+    elif event_type == "ema20_cross_ema50_up":
+        condition = pre_ema20 <= pre_ema50 and all(cur_ema20[i] > cur_ema50[i] for i in range(len(cur_ema20)))
+    elif event_type == "ema20_cross_ema50_down":
+        condition = pre_ema20 >= pre_ema50 and all(cur_ema20[i] < cur_ema50[i] for i in range(len(cur_ema20)))
+    elif event_type == "ma_bull_alignment":
+        condition = all(
+            cur_closes[i] > cur_sma20[i] > cur_sma50[i] and cur_ema20[i] > cur_ema50[i]
+            for i in range(len(cur_closes))
+        )
+    elif event_type == "ma_bear_alignment":
+        condition = all(
+            cur_closes[i] < cur_sma20[i] < cur_sma50[i] and cur_ema20[i] < cur_ema50[i]
+            for i in range(len(cur_closes))
+        )
+    else:
+        raise RuntimeError(f"unsupported MA event type: {event_type}")
+
+    detail.update(
+        {
+            "pre_close": pre_close,
+            "last_close": last_close,
+            "pre_sma20": pre_sma20,
+            "pre_sma50": pre_sma50,
+            "pre_ema20": pre_ema20,
+            "pre_ema50": pre_ema50,
+            "last_sma20": cur_sma20[-1],
+            "last_sma50": cur_sma50[-1],
+            "last_ema20": cur_ema20[-1],
+            "last_ema50": cur_ema50[-1],
+            "reason": "ok" if condition else "condition_false",
+        }
+    )
+    return condition, detail
+
+
+def evaluate_bb_event(
+    event_type: str,
+    opens: list[float],
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    bb_upper: list[float | None],
+    bb_mid: list[float | None],
+    bb_lower: list[float | None],
+    confirm_bars: int,
+    lookback_bars: int,
+    bb_width_threshold: float,
+) -> tuple[bool, dict[str, Any]]:
+    confirm_bars = max(1, int(confirm_bars))
+    lookback_bars = max(2, int(lookback_bars))
+    n = len(closes)
+    start = n - confirm_bars
+    pre = start - 1
+    detail: dict[str, Any] = {
+        "confirm_bars": confirm_bars,
+        "lookback_bars": lookback_bars,
+        "bb_width_threshold": bb_width_threshold,
+    }
+    if pre < 0:
+        detail["reason"] = "not_enough_bars"
+        return False, detail
+
+    def need(series: list[float | None], idx: int) -> float:
+        value = series[idx]
+        if value is None:
+            raise RuntimeError("insufficient_indicator_history")
+        return float(value)
+
+    try:
+        pre_upper = need(bb_upper, pre)
+        pre_lower = need(bb_lower, pre)
+        pre_mid = need(bb_mid, pre)
+        cur_upper = [need(bb_upper, idx) for idx in range(start, n)]
+        cur_lower = [need(bb_lower, idx) for idx in range(start, n)]
+        cur_mid = [need(bb_mid, idx) for idx in range(start, n)]
+    except RuntimeError:
+        detail["reason"] = "insufficient_indicator_history"
+        return False, detail
+
+    last_open = float(opens[-1])
+    last_high = float(highs[-1])
+    last_low = float(lows[-1])
+    last_close = float(closes[-1])
+    pre_close = float(closes[pre])
+    last_upper = cur_upper[-1]
+    last_lower = cur_lower[-1]
+    last_mid = cur_mid[-1]
+
+    def bw(upper: float, lower: float, mid: float) -> float:
+        denom = abs(mid) if abs(mid) > 1e-12 else 1e-12
+        return (upper - lower) / denom
+
+    pre_bw = bw(pre_upper, pre_lower, pre_mid)
+    cur_bw = [bw(cur_upper[idx], cur_lower[idx], cur_mid[idx]) for idx in range(len(cur_upper))]
+    last_bw = cur_bw[-1]
+
+    if event_type == "bb_touch_upper":
+        condition = last_high >= last_upper
+    elif event_type == "bb_touch_lower":
+        condition = last_low <= last_lower
+    elif event_type == "bb_close_outside_upper":
+        condition = last_close > last_upper
+    elif event_type == "bb_close_outside_lower":
+        condition = last_close < last_lower
+    elif event_type == "bb_reenter_from_upper":
+        condition = pre_close > pre_upper and all(closes[idx] <= cur_upper[idx - start] for idx in range(start, n))
+    elif event_type == "bb_reenter_from_lower":
+        condition = pre_close < pre_lower and all(closes[idx] >= cur_lower[idx - start] for idx in range(start, n))
+    elif event_type == "bb_squeeze_start":
+        condition = pre_bw > bb_width_threshold and all(value <= bb_width_threshold for value in cur_bw)
+    elif event_type in ("bb_squeeze_breakout_up", "bb_squeeze_breakout_down"):
+        win_start = max(0, n - lookback_bars)
+        squeeze_vals: list[float] = []
+        for idx in range(win_start, n):
+            up = bb_upper[idx]
+            lo = bb_lower[idx]
+            mid = bb_mid[idx]
+            if up is None or lo is None or mid is None:
+                continue
+            squeeze_vals.append(bw(float(up), float(lo), float(mid)))
+        if not squeeze_vals:
+            detail["reason"] = "insufficient_indicator_history"
+            return False, detail
+        squeezed_recently = min(squeeze_vals) <= bb_width_threshold
+        if event_type == "bb_squeeze_breakout_up":
+            condition = squeezed_recently and last_close > last_upper
+        else:
+            condition = squeezed_recently and last_close < last_lower
+        detail["squeeze_window_min_bw"] = min(squeeze_vals)
+    else:
+        raise RuntimeError(f"unsupported BB event type: {event_type}")
+
+    detail.update(
+        {
+            "pre_close": pre_close,
+            "last_open": last_open,
+            "last_high": last_high,
+            "last_low": last_low,
+            "last_close": last_close,
+            "pre_upper": pre_upper,
+            "pre_lower": pre_lower,
+            "last_upper": last_upper,
+            "last_lower": last_lower,
+            "last_mid": last_mid,
+            "pre_bb_width": pre_bw,
+            "last_bb_width": last_bw,
+            "reason": "ok" if condition else "condition_false",
+        }
+    )
+    return condition, detail
+
+
+def evaluate_volume_event(
+    event_type: str,
+    closes: list[float],
+    volumes: list[float],
+    confirm_bars: int,
+    volume_spike_multiplier: float,
+    volume_dry_threshold: float,
+) -> tuple[bool, dict[str, Any]]:
+    confirm_bars = max(1, int(confirm_bars))
+    n = len(closes)
+    start = n - confirm_bars
+    pre = start - 1
+    detail: dict[str, Any] = {"confirm_bars": confirm_bars}
+    if pre < 0:
+        detail["reason"] = "not_enough_bars"
+        return False, detail
+
+    vol_ma20 = rolling_mean(volumes, 20)
+    if vol_ma20[-1] is None:
+        detail["reason"] = "insufficient_indicator_history"
+        return False, detail
+
+    last_volume = float(volumes[-1])
+    last_close = float(closes[-1])
+    pre_close = float(closes[pre])
+    last_vol_ma20 = float(vol_ma20[-1])  # type: ignore[arg-type]
+
+    if event_type == "volume_spike_up":
+        condition = last_close > pre_close and last_volume >= last_vol_ma20 * volume_spike_multiplier
+        detail["volume_spike_multiplier"] = volume_spike_multiplier
+    elif event_type == "volume_spike_down":
+        condition = last_close < pre_close and last_volume >= last_vol_ma20 * volume_spike_multiplier
+        detail["volume_spike_multiplier"] = volume_spike_multiplier
+    elif event_type == "volume_dry_up":
+        condition = last_volume <= last_vol_ma20 * volume_dry_threshold
+        detail["volume_dry_threshold"] = volume_dry_threshold
+    elif event_type in ("obv_cross_ma_up", "obv_cross_ma_down"):
+        obv_line = obv_series(closes, volumes)
+        obv_ma = rolling_mean(obv_line, 20)
+        if obv_ma[pre] is None:
+            detail["reason"] = "insufficient_indicator_history"
+            return False, detail
+        pre_obv = float(obv_line[pre])
+        pre_obv_ma = float(obv_ma[pre])  # type: ignore[arg-type]
+
+        cur_obv: list[float] = []
+        cur_obv_ma: list[float] = []
+        for idx in range(start, n):
+            ma_value = obv_ma[idx]
+            if ma_value is None:
+                detail["reason"] = "insufficient_indicator_history"
+                return False, detail
+            cur_obv.append(float(obv_line[idx]))
+            cur_obv_ma.append(float(ma_value))
+
+        if event_type == "obv_cross_ma_up":
+            condition = pre_obv <= pre_obv_ma and all(cur_obv[i] > cur_obv_ma[i] for i in range(len(cur_obv)))
+        else:
+            condition = pre_obv >= pre_obv_ma and all(cur_obv[i] < cur_obv_ma[i] for i in range(len(cur_obv)))
+
+        detail.update(
+            {
+                "pre_obv": pre_obv,
+                "pre_obv_ma20": pre_obv_ma,
+                "last_obv": cur_obv[-1],
+                "last_obv_ma20": cur_obv_ma[-1],
+            }
+        )
+    else:
+        raise RuntimeError(f"unsupported volume event type: {event_type}")
+
+    detail.update(
+        {
+            "pre_close": pre_close,
+            "last_close": last_close,
+            "last_volume": last_volume,
+            "last_vol_ma20": last_vol_ma20,
+            "reason": "ok" if condition else "condition_false",
+        }
+    )
+    return condition, detail
+
+
+def evaluate_breakout_event(
+    event_type: str,
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    confirm_bars: int,
+    lookback_bars: int,
+    pivot_left: int,
+    pivot_right: int,
+) -> tuple[bool, dict[str, Any]]:
+    confirm_bars = max(1, int(confirm_bars))
+    lookback_bars = max(2, int(lookback_bars))
+    n = len(closes)
+    start = n - confirm_bars
+    pre = start - 1
+    detail: dict[str, Any] = {
+        "confirm_bars": confirm_bars,
+        "lookback_bars": lookback_bars,
+        "pivot_left": pivot_left,
+        "pivot_right": pivot_right,
+    }
+    if pre < 1:
+        detail["reason"] = "not_enough_bars"
+        return False, detail
+
+    def rolling_prev_high(idx: int) -> float | None:
+        lo = max(0, idx - lookback_bars)
+        hi = idx
+        if hi <= lo:
+            return None
+        return max(highs[lo:hi])
+
+    def rolling_prev_low(idx: int) -> float | None:
+        lo = max(0, idx - lookback_bars)
+        hi = idx
+        if hi <= lo:
+            return None
+        return min(lows[lo:hi])
+
+    pre_close = float(closes[pre])
+    last_close = float(closes[-1])
+    last_high = float(highs[-1])
+    last_low = float(lows[-1])
+
+    if event_type in ("breakout_n_bar_high", "breakdown_n_bar_low", "donchian_breakout_up", "donchian_breakout_down"):
+        pre_ref_high = rolling_prev_high(pre)
+        pre_ref_low = rolling_prev_low(pre)
+        if pre_ref_high is None or pre_ref_low is None:
+            detail["reason"] = "not_enough_bars"
+            return False, detail
+
+        refs_high: list[float] = []
+        refs_low: list[float] = []
+        for idx in range(start, n):
+            rh = rolling_prev_high(idx)
+            rl = rolling_prev_low(idx)
+            if rh is None or rl is None:
+                detail["reason"] = "not_enough_bars"
+                return False, detail
+            refs_high.append(float(rh))
+            refs_low.append(float(rl))
+
+        if event_type == "breakout_n_bar_high":
+            condition = pre_close <= pre_ref_high and all(closes[idx] > refs_high[idx - start] for idx in range(start, n))
+            detail["reference_level"] = refs_high[-1]
+        elif event_type == "breakdown_n_bar_low":
+            condition = pre_close >= pre_ref_low and all(closes[idx] < refs_low[idx - start] for idx in range(start, n))
+            detail["reference_level"] = refs_low[-1]
+        elif event_type == "donchian_breakout_up":
+            condition = highs[pre] <= pre_ref_high and all(highs[idx] > refs_high[idx - start] for idx in range(start, n))
+            detail["reference_level"] = refs_high[-1]
+        else:
+            condition = lows[pre] >= pre_ref_low and all(lows[idx] < refs_low[idx - start] for idx in range(start, n))
+            detail["reference_level"] = refs_low[-1]
+    elif event_type in ("swing_high_break", "swing_low_break"):
+        piv_kind = "high" if event_type == "swing_high_break" else "low"
+        series = [float(v) for v in highs] if piv_kind == "high" else [float(v) for v in lows]
+        pivots = find_pivot_indices([float(v) for v in series], max(1, pivot_left), max(1, pivot_right), piv_kind)
+        pivots = [idx for idx in pivots if idx < start]
+        if not pivots:
+            detail["reason"] = "no_swing_pivot"
+            return False, detail
+        pivot_idx = pivots[-1]
+        level = float(series[pivot_idx])
+        if event_type == "swing_high_break":
+            condition = pre_close <= level and all(closes[idx] > level for idx in range(start, n))
+        else:
+            condition = pre_close >= level and all(closes[idx] < level for idx in range(start, n))
+        detail["swing_level"] = level
+        detail["swing_index"] = pivot_idx
+    else:
+        raise RuntimeError(f"unsupported breakout event type: {event_type}")
+
+    detail.update(
+        {
+            "pre_close": pre_close,
+            "last_close": last_close,
+            "last_high": last_high,
+            "last_low": last_low,
+            "reason": "ok" if condition else "condition_false",
+        }
+    )
+    return condition, detail
+
+
+def fib_level_price(fib: dict[str, Any], ratio: float) -> float | None:
+    levels = fib.get("levels") if isinstance(fib, dict) else None
+    if not isinstance(levels, list):
+        return None
+    for level in levels:
+        if not isinstance(level, dict):
+            continue
+        try:
+            rv = float(level.get("ratio"))
+            pv = float(level.get("price"))
+        except Exception:
+            continue
+        if abs(rv - ratio) <= 1e-9:
+            return pv
+    return None
+
+
+def evaluate_fib_event(
+    event_type: str,
+    opens: list[float],
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    confirm_bars: int,
+    fib_anchor_bars: int,
+    fib_touch_tolerance: float,
+) -> tuple[bool, dict[str, Any]]:
+    confirm_bars = max(1, int(confirm_bars))
+    fib_anchor_bars = max(20, int(fib_anchor_bars))
+    n = len(closes)
+    start = n - confirm_bars
+    pre = start - 1
+    detail: dict[str, Any] = {
+        "confirm_bars": confirm_bars,
+        "fib_anchor_bars": fib_anchor_bars,
+        "fib_touch_tolerance": fib_touch_tolerance,
+    }
+    if pre < 0:
+        detail["reason"] = "not_enough_bars"
+        return False, detail
+
+    anchor_start = max(0, n - fib_anchor_bars)
+    fib = fibonacci_levels(highs[anchor_start:], lows[anchor_start:], closes[anchor_start:])
+    ratio_map = {
+        "fib_touch_0_382": 0.382,
+        "fib_touch_0_5": 0.5,
+        "fib_touch_0_618": 0.618,
+        "fib_reject_0_618_up": 0.618,
+        "fib_reject_0_618_down": 0.618,
+        "fib_break_0_618_up": 0.618,
+        "fib_break_0_618_down": 0.618,
+    }
+    ratio = ratio_map.get(event_type)
+    if ratio is None:
+        raise RuntimeError(f"unsupported Fibonacci event type: {event_type}")
+    level = fib_level_price(fib, ratio)
+    if level is None:
+        detail["reason"] = "fib_level_missing"
+        return False, detail
+
+    pre_close = float(closes[pre])
+    last_open = float(opens[-1])
+    last_high = float(highs[-1])
+    last_low = float(lows[-1])
+    last_close = float(closes[-1])
+
+    if event_type in ("fib_touch_0_382", "fib_touch_0_5", "fib_touch_0_618"):
+        touched = last_low <= level <= last_high
+        near = abs(last_close - level) / (abs(level) if abs(level) > 1e-12 else 1e-12) <= fib_touch_tolerance
+        condition = touched or near
+    elif event_type == "fib_reject_0_618_up":
+        condition = last_low <= level and last_close > level and last_close > last_open
+    elif event_type == "fib_reject_0_618_down":
+        condition = last_high >= level and last_close < level and last_close < last_open
+    elif event_type == "fib_break_0_618_up":
+        condition = pre_close <= level and all(closes[idx] > level for idx in range(start, n))
+    else:
+        condition = pre_close >= level and all(closes[idx] < level for idx in range(start, n))
+
+    detail.update(
+        {
+            "fib_ratio": ratio,
+            "fib_level": float(level),
+            "fib_trend": fib.get("trend"),
+            "pre_close": pre_close,
+            "last_open": last_open,
+            "last_high": last_high,
+            "last_low": last_low,
+            "last_close": last_close,
+            "reason": "ok" if condition else "condition_false",
+        }
+    )
+    return condition, detail
+
+
+def evaluate_divergence_event(
+    event_type: str,
+    closes: list[float],
+    highs: list[float],
+    lows: list[float],
+    indicator_series: list[float | None],
+    indicator_name: str,
+    confirm_bars: int,
+    pivot_left: int,
+    pivot_right: int,
+    min_pivot_gap: int,
+    max_pivot_gap: int,
+    min_price_delta_pct: float,
+    min_indicator_delta: float,
+    dedup_window_bars: int,
+) -> tuple[bool, dict[str, Any]]:
+    n = len(closes)
+    last_idx = n - 1
+    detail: dict[str, Any] = {
+        "confirm_bars": confirm_bars,
+        "pivot_left": pivot_left,
+        "pivot_right": pivot_right,
+        "min_pivot_gap": min_pivot_gap,
+        "max_pivot_gap": max_pivot_gap,
+        "min_price_delta_pct": min_price_delta_pct,
+        "min_indicator_delta": min_indicator_delta,
+        "dedup_window_bars": dedup_window_bars,
+        "indicator_name": indicator_name,
+    }
+    if last_idx < 5:
+        detail["reason"] = "not_enough_bars"
+        return False, detail
+
+    is_bull = "_bull_" in event_type
+    is_hidden = "_hidden_" in event_type
+    pivot_kind = "low" if is_bull else "high"
+
+    price_series: list[float | None]
+    if pivot_kind == "low":
+        price_series = [float(v) for v in lows]
+    else:
+        price_series = [float(v) for v in highs]
+
+    pivots = find_pivot_indices(price_series, pivot_left, pivot_right, pivot_kind)
+    pair = find_recent_pivot_pair(pivots, min_pivot_gap, max_pivot_gap, dedup_window_bars, last_idx)
+    if pair is None:
+        detail["reason"] = "no_valid_pivot_pair"
+        return False, detail
+    i1, i2 = pair
+
+    price1 = float(price_series[i1])  # type: ignore[arg-type]
+    price2 = float(price_series[i2])  # type: ignore[arg-type]
+    ind1 = indicator_series[i1]
+    ind2 = indicator_series[i2]
+    if ind1 is None or ind2 is None:
+        detail["reason"] = "insufficient_indicator_history"
+        return False, detail
+    ind1f = float(ind1)
+    ind2f = float(ind2)
+
+    min_price_ratio = min_price_delta_pct / 100.0
+    if is_bull:
+        if is_hidden:
+            price_cond = price2 > price1 * (1.0 + min_price_ratio)
+            ind_cond = ind2f < ind1f - min_indicator_delta
+        else:
+            price_cond = price2 < price1 * (1.0 - min_price_ratio)
+            ind_cond = ind2f > ind1f + min_indicator_delta
+        confirm_cond = all(float(closes[idx]) > float(closes[i2]) for idx in range(max(0, n - confirm_bars), n))
+    else:
+        if is_hidden:
+            price_cond = price2 < price1 * (1.0 - min_price_ratio)
+            ind_cond = ind2f > ind1f + min_indicator_delta
+        else:
+            price_cond = price2 > price1 * (1.0 + min_price_ratio)
+            ind_cond = ind2f < ind1f - min_indicator_delta
+        confirm_cond = all(float(closes[idx]) < float(closes[i2]) for idx in range(max(0, n - confirm_bars), n))
+
+    condition = bool(price_cond and ind_cond and confirm_cond)
+    detail.update(
+        {
+            "pivot_a_index": i1,
+            "pivot_b_index": i2,
+            "pivot_a_price": price1,
+            "pivot_b_price": price2,
+            "pivot_a_indicator": ind1f,
+            "pivot_b_indicator": ind2f,
+            "price_condition": price_cond,
+            "indicator_condition": ind_cond,
+            "confirm_condition": confirm_cond,
+            "reason": "ok" if condition else "condition_false",
+        }
+    )
+    return condition, detail
+
+
+def resolve_snapshot_flags_for_event(event_type: str) -> dict[str, bool]:
+    flags = {
+        "sma": False,
+        "ema": False,
+        "macd": False,
+        "rsi": False,
+        "bb": False,
+        "vol_ma": False,
+        "fib": False,
+    }
+    if event_type in MACD_EVENT_TYPES or event_type.startswith("macd_"):
+        flags["macd"] = True
+    if event_type in RSI_EVENT_TYPES or event_type.startswith("rsi_"):
+        flags["rsi"] = True
+    if event_type in MA_EVENT_TYPES:
+        flags["sma"] = True
+        flags["ema"] = True
+    if event_type in BB_EVENT_TYPES:
+        flags["bb"] = True
+    if event_type in VOLUME_EVENT_TYPES or event_type.startswith("obv_"):
+        flags["vol_ma"] = True
+    if event_type in FIB_EVENT_TYPES:
+        flags["fib"] = True
+    if event_type in BREAKOUT_EVENT_TYPES:
+        flags["sma"] = True
+    return flags
+
+
+def build_event_snapshot(rule: dict[str, Any], evaluation: dict[str, Any]) -> Path:
+    event_type = str(rule.get("event_type", "")).strip().lower()
+    params = normalize_event_params_for_compare(event_type, rule.get("params", {}))
+
+    asset_type = str(rule.get("asset_type", "")).strip().lower()
+    period = str(rule.get("period", "")).strip()
+    interval = str(rule.get("interval", "")).strip()
+    symbol = str(rule.get("quote_symbol") or rule.get("symbol") or "").strip()
+    if not symbol:
+        raise RuntimeError("event snapshot missing symbol")
+
+    chart_payload = fetch_chart_data(asset_type, symbol, period, interval)
+    flags = resolve_snapshot_flags_for_event(event_type)
+    indicators = compute_indicators(chart_payload["candles"], flags)
+
+    chart_type = str(params.get("snapshot_chart_type", "candlestick"))
+    out_path = default_chart_path(chart_payload["symbol"], period, interval, f"event_{chart_type}")
+    render_chart_png(
+        chart_payload=chart_payload,
+        indicators=indicators,
+        chart_type=chart_type,
+        show_volume=True,
+        show_rsi=bool(flags.get("rsi", False)),
+        show_macd=bool(flags.get("macd", False)),
+        out_path=out_path,
+        width=float(params.get("snapshot_width", 14.0)),
+        height=float(params.get("snapshot_height", 8.0)),
+        dpi=int(params.get("snapshot_dpi", 150)),
+    )
+    return out_path
+
+
+def evaluate_event_rule_on_chart(rule: dict[str, Any], chart_payload: dict[str, Any]) -> dict[str, Any]:
+    event_type = str(rule.get("event_type", "")).strip().lower()
+    if event_type not in EVENT_TYPE_CHOICES:
+        raise RuntimeError(f"unsupported event type: {event_type}")
+
+    params = normalize_event_params_for_compare(event_type, rule.get("params", {}))
+    confirm_bars = max(1, int(rule.get("confirm_bars", 1)))
+    candles = chart_payload["candles"]
+    opens = [float(c["open"]) for c in candles]
+    highs = [float(c["high"]) for c in candles]
+    lows = [float(c["low"]) for c in candles]
+    closes = [float(c["close"]) for c in candles]
+    volumes = [float(c["volume"]) for c in candles]
+
+    if event_type in MACD_EVENT_TYPES:
+        fast, slow, signal, profile = extract_macd_params({"params": params})
+        macd_line, signal_line, hist_line = macd_series_custom(closes, fast, slow, signal)
+        hist_expand_bars = int(params.get("hist_expand_bars", 3))
+        condition, detail = evaluate_macd_cross_event(
+            event_type,
+            macd_line,
+            signal_line,
+            hist_line,
+            confirm_bars,
+            hist_expand_bars,
+        )
+        detail["macd_profile"] = profile
+        detail["macd_fast"] = fast
+        detail["macd_slow"] = slow
+        detail["macd_signal"] = signal
+    elif event_type in RSI_EVENT_TYPES:
+        rsi_line = rsi_series(closes, 14)
+        condition, detail = evaluate_rsi_event(event_type, rsi_line, confirm_bars)
+    elif event_type in MA_EVENT_TYPES:
+        sma20 = rolling_mean(closes, 20)
+        sma50 = rolling_mean(closes, 50)
+        ema20 = ema_series(closes, 20)
+        ema50 = ema_series(closes, 50)
+        condition, detail = evaluate_ma_event(event_type, closes, sma20, sma50, ema20, ema50, confirm_bars)
+    elif event_type in BB_EVENT_TYPES:
+        bb_mid = rolling_mean(closes, 20)
+        bb_std = rolling_std(closes, 20)
+        bb_upper: list[float | None] = [None] * len(closes)
+        bb_lower: list[float | None] = [None] * len(closes)
+        for idx, (mid, std) in enumerate(zip(bb_mid, bb_std)):
+            if mid is None or std is None:
+                continue
+            bb_upper[idx] = mid + 2.0 * std
+            bb_lower[idx] = mid - 2.0 * std
+        condition, detail = evaluate_bb_event(
+            event_type,
+            opens,
+            highs,
+            lows,
+            closes,
+            bb_upper,
+            bb_mid,
+            bb_lower,
+            confirm_bars,
+            int(params.get("lookback_bars", 20)),
+            float(params.get("bb_width_threshold", 0.06)),
+        )
+    elif event_type in VOLUME_EVENT_TYPES:
+        condition, detail = evaluate_volume_event(
+            event_type,
+            closes,
+            volumes,
+            confirm_bars,
+            float(params.get("volume_spike_multiplier", 1.8)),
+            float(params.get("volume_dry_threshold", 0.6)),
+        )
+    elif event_type in BREAKOUT_EVENT_TYPES:
+        condition, detail = evaluate_breakout_event(
+            event_type,
+            highs,
+            lows,
+            closes,
+            confirm_bars,
+            int(params.get("lookback_bars", 20)),
+            int(params.get("pivot_left", 3)),
+            int(params.get("pivot_right", 3)),
+        )
+    elif event_type in FIB_EVENT_TYPES:
+        condition, detail = evaluate_fib_event(
+            event_type,
+            opens,
+            highs,
+            lows,
+            closes,
+            confirm_bars,
+            int(params.get("fib_anchor_bars", 120)),
+            float(params.get("fib_touch_tolerance", 0.002)),
+        )
+    elif event_type in DIVERGENCE_EVENT_TYPES:
+        if event_type.startswith("rsi_"):
+            indicator = rsi_series(closes, 14)
+            indicator_name = "rsi14"
+        elif event_type.startswith("macd_"):
+            fast, slow, signal, profile = extract_macd_params({"params": params})
+            macd_line, _, _ = macd_series_custom(closes, fast, slow, signal)
+            indicator = macd_line
+            indicator_name = "macd_line"
+        else:
+            indicator = [float(v) for v in obv_series(closes, volumes)]
+            indicator_name = "obv"
+
+        condition, detail = evaluate_divergence_event(
+            event_type,
+            closes,
+            highs,
+            lows,
+            indicator,
+            indicator_name,
+            confirm_bars,
+            int(params.get("pivot_left", 3)),
+            int(params.get("pivot_right", 3)),
+            int(params.get("min_pivot_gap", 5)),
+            int(params.get("max_pivot_gap", 120)),
+            float(params.get("min_price_delta_pct", 0.3)),
+            float(params.get("min_indicator_delta", 0.1)),
+            int(params.get("dedup_window_bars", 20)),
+        )
+        if event_type.startswith("macd_"):
+            detail["macd_profile"] = profile  # type: ignore[name-defined]
+            detail["macd_fast"] = fast  # type: ignore[name-defined]
+            detail["macd_slow"] = slow  # type: ignore[name-defined]
+            detail["macd_signal"] = signal  # type: ignore[name-defined]
+    else:
+        raise RuntimeError(f"unsupported event type: {event_type}")
+
+    detail["severity"] = resolve_event_severity(event_type, params)
+    detail["attach_chart"] = bool(params.get("attach_chart", False))
+    detail["params"] = params
+
+    return {
+        "event_type": event_type,
+        "condition": bool(condition),
+        "chart": {
+            "symbol": chart_payload["symbol"],
+            "period": chart_payload["period"],
+            "interval": chart_payload["interval"],
+            "source": chart_payload["source"],
+            "as_of": chart_payload["as_of"],
+            "checked_at": chart_payload["checked_at"],
+        },
+        "detail": detail,
+    }
+
+
 def evaluate_event_rule(rule: dict[str, Any]) -> dict[str, Any]:
     event_type = str(rule.get("event_type", "")).strip().lower()
     if event_type not in EVENT_TYPE_CHOICES:
@@ -1663,44 +2816,7 @@ def evaluate_event_rule(rule: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("event rule missing symbol")
 
     chart_payload = fetch_chart_data(asset_type, chart_symbol, period, interval)
-    candles = chart_payload["candles"]
-    closes = [float(c["close"]) for c in candles]
-
-    confirm_bars = max(1, int(rule.get("confirm_bars", 1)))
-    if event_type.startswith("macd_"):
-        fast, slow, signal, profile = extract_macd_params(rule)
-        macd_line, signal_line, hist_line = macd_series_custom(closes, fast, slow, signal)
-        params = rule.get("params") if isinstance(rule.get("params"), dict) else {}
-        hist_expand_bars = int(params.get("hist_expand_bars", 3))
-        condition, detail = evaluate_macd_cross_event(
-            event_type,
-            macd_line,
-            signal_line,
-            hist_line,
-            confirm_bars,
-            hist_expand_bars,
-        )
-        detail["macd_profile"] = profile
-        detail["macd_fast"] = fast
-        detail["macd_slow"] = slow
-        detail["macd_signal"] = signal
-        detail["hist_expand_bars"] = max(2, hist_expand_bars)
-    else:
-        raise RuntimeError(f"unsupported event type: {event_type}")
-
-    return {
-        "event_type": event_type,
-        "condition": bool(condition),
-        "chart": {
-            "symbol": chart_payload["symbol"],
-            "period": period,
-            "interval": interval,
-            "source": chart_payload["source"],
-            "as_of": chart_payload["as_of"],
-            "checked_at": chart_payload["checked_at"],
-        },
-        "detail": detail,
-    }
+    return evaluate_event_rule_on_chart(rule, chart_payload)
 
 
 def can_trigger_with_cooldown(last_triggered_at: str, cooldown_minutes: int) -> bool:
@@ -1717,9 +2833,10 @@ def format_event_message(rule: dict[str, Any], evaluation: dict[str, Any]) -> st
     event_type = str(rule.get("event_type", ""))
     chart = evaluation.get("chart", {})
     detail = evaluation.get("detail", {})
+    severity = str(detail.get("severity", "info")).lower()
 
     parts = [
-        f"[EVENT ALERT] {chart.get('symbol', rule.get('symbol'))} {event_type}",
+        f"[EVENT ALERT][{severity.upper()}] {chart.get('symbol', rule.get('symbol'))} {event_type}",
         f"tf={chart.get('period')}/{chart.get('interval')}",
         f"source={chart.get('source')}",
         f"as_of={chart.get('as_of')}",
@@ -1758,6 +2875,56 @@ def format_event_message(rule: dict[str, Any], evaluation: dict[str, Any]) -> st
                 serialized = [f"{float(v):.6f}" for v in hist_window if isinstance(v, (int, float))]
                 if len(serialized) == len(hist_window):
                     parts.append(f"hist_window={','.join(serialized)}")
+    elif event_type in RSI_EVENT_TYPES:
+        append_float("pre_rsi", detail.get("pre_rsi"))
+        append_float("rsi", detail.get("last_rsi"))
+        append_float("threshold", detail.get("threshold"))
+        parts.append(f"confirm={detail.get('confirm_bars')}")
+    elif event_type in MA_EVENT_TYPES:
+        append_float("pre_close", detail.get("pre_close"))
+        append_float("close", detail.get("last_close"))
+        append_float("sma20", detail.get("last_sma20"))
+        append_float("sma50", detail.get("last_sma50"))
+        append_float("ema20", detail.get("last_ema20"))
+        append_float("ema50", detail.get("last_ema50"))
+        parts.append(f"confirm={detail.get('confirm_bars')}")
+    elif event_type in BB_EVENT_TYPES:
+        append_float("close", detail.get("last_close"))
+        append_float("bb_upper", detail.get("last_upper"))
+        append_float("bb_mid", detail.get("last_mid"))
+        append_float("bb_lower", detail.get("last_lower"))
+        append_float("bb_width", detail.get("last_bb_width"))
+        append_float("bb_width_threshold", detail.get("bb_width_threshold"))
+    elif event_type in VOLUME_EVENT_TYPES:
+        append_float("close", detail.get("last_close"))
+        append_float("volume", detail.get("last_volume"))
+        append_float("vol_ma20", detail.get("last_vol_ma20"))
+        append_float("obv", detail.get("last_obv"))
+        append_float("obv_ma20", detail.get("last_obv_ma20"))
+    elif event_type in BREAKOUT_EVENT_TYPES:
+        append_float("close", detail.get("last_close"))
+        append_float("high", detail.get("last_high"))
+        append_float("low", detail.get("last_low"))
+        append_float("level", detail.get("reference_level"))
+        append_float("swing_level", detail.get("swing_level"))
+        parts.append(f"lookback={detail.get('lookback_bars')}")
+    elif event_type in FIB_EVENT_TYPES:
+        append_float("close", detail.get("last_close"))
+        append_float("fib_level", detail.get("fib_level"))
+        append_float("fib_ratio", detail.get("fib_ratio"))
+        parts.append(f"fib_trend={detail.get('fib_trend')}")
+    elif event_type in DIVERGENCE_EVENT_TYPES:
+        append_float("p1_price", detail.get("pivot_a_price"))
+        append_float("p2_price", detail.get("pivot_b_price"))
+        append_float("p1_ind", detail.get("pivot_a_indicator"))
+        append_float("p2_ind", detail.get("pivot_b_indicator"))
+        parts.append(f"pivot_idx={detail.get('pivot_a_index')}->{detail.get('pivot_b_index')}")
+        parts.append(f"ind={detail.get('indicator_name')}")
+        parts.append(f"confirm={detail.get('confirm_bars')}")
+
+    reason = detail.get("reason")
+    if reason:
+        parts.append(f"reason={reason}")
 
     return " ".join(str(p) for p in parts)
 
@@ -2010,6 +3177,93 @@ def cmd_check(args: argparse.Namespace) -> int:
             pass
 
 
+def build_event_params_from_args(event_type: str, asset_type: str, args: argparse.Namespace) -> dict[str, Any]:
+    raw: dict[str, Any] = {
+        "severity": str(args.severity),
+        "attach_chart": bool(args.attach_chart),
+        "snapshot_chart_type": str(args.snapshot_chart_type),
+        "snapshot_width": float(args.snapshot_width),
+        "snapshot_height": float(args.snapshot_height),
+        "snapshot_dpi": int(args.snapshot_dpi),
+        "lookback_bars": int(args.lookback_bars),
+        "bb_width_threshold": float(args.bb_width_threshold),
+        "volume_spike_multiplier": float(args.volume_spike_multiplier),
+        "volume_dry_threshold": float(args.volume_dry_threshold),
+        "fib_anchor_bars": int(args.fib_anchor_bars),
+        "fib_touch_tolerance": float(args.fib_touch_tolerance),
+        "pivot_left": int(args.pivot_left),
+        "pivot_right": int(args.pivot_right),
+        "min_pivot_gap": int(args.min_pivot_gap),
+        "max_pivot_gap": int(args.max_pivot_gap),
+        "min_price_delta_pct": float(args.min_price_delta_pct),
+        "min_indicator_delta": float(args.min_indicator_delta),
+        "dedup_window_bars": int(args.dedup_window_bars),
+    }
+    if event_type in MACD_EVENT_WITH_PROFILE_TYPES:
+        raw.update(resolve_macd_profile_params(asset_type, args.macd_profile, args.macd_fast, args.macd_slow, args.macd_signal))
+    if event_type in MACD_HIST_EXPAND_EVENT_TYPES:
+        raw["hist_expand_bars"] = max(2, int(args.hist_expand_bars))
+    return normalize_event_params_for_compare(event_type, raw)
+
+
+def upsert_event_rule(
+    rules: list[dict[str, Any]],
+    event_type: str,
+    asset_type: str,
+    symbol_for_rule: str,
+    quote_symbol: str,
+    period: str,
+    interval: str,
+    confirm_bars: int,
+    cooldown_minutes: int,
+    dedup_mode: str,
+    params: dict[str, Any],
+    channel: str,
+    target: str,
+    note: str,
+) -> tuple[dict[str, Any], bool]:
+    norm_params = normalize_event_params_for_compare(event_type, params)
+    for existing in rules:
+        existing_event_type = str(existing.get("event_type", "")).strip().lower()
+        existing_params = normalize_event_params_for_compare(existing_event_type, existing.get("params", {}))
+        if (
+            bool(existing.get("enabled", True))
+            and existing_event_type == event_type
+            and str(existing.get("asset_type", "")).strip().lower() == asset_type
+            and str(existing.get("symbol", "")) == symbol_for_rule
+            and str(existing.get("period", "")) == period
+            and str(existing.get("interval", "")) == interval
+            and int(existing.get("confirm_bars", 1)) == confirm_bars
+            and int(existing.get("cooldown_minutes", 0)) == cooldown_minutes
+            and str(existing.get("dedup_mode", "cross_once")).lower() == dedup_mode
+            and str(existing.get("channel", "")) == channel
+            and str(existing.get("target", "")) == target
+            and existing_params == norm_params
+        ):
+            return existing, False
+
+    rule = {
+        "id": secrets.token_hex(4),
+        "event_type": event_type,
+        "asset_type": asset_type,
+        "symbol": symbol_for_rule,
+        "quote_symbol": quote_symbol,
+        "period": period,
+        "interval": interval,
+        "confirm_bars": confirm_bars,
+        "cooldown_minutes": cooldown_minutes,
+        "dedup_mode": dedup_mode,
+        "params": norm_params,
+        "channel": channel,
+        "target": target,
+        "note": note,
+        "enabled": True,
+        "created_at": now_iso(),
+    }
+    rules.append(rule)
+    return rule, True
+
+
 def cmd_event_add(args: argparse.Namespace) -> int:
     ensure_state_dir()
 
@@ -2034,89 +3288,190 @@ def cmd_event_add(args: argparse.Namespace) -> int:
     cooldown_minutes = max(0, int(args.cooldown_minutes))
     dedup_mode = str(args.dedup_mode).strip().lower()
 
-    params: dict[str, Any] = {}
-    if event_type.startswith("macd_"):
-        params = resolve_macd_profile_params(asset_type, args.macd_profile, args.macd_fast, args.macd_slow, args.macd_signal)
-        if event_type in MACD_HIST_EXPAND_EVENT_TYPES:
-            params["hist_expand_bars"] = max(2, int(args.hist_expand_bars))
-
-    def comparable_event_params(raw_params: Any) -> dict[str, Any]:
-        if not isinstance(raw_params, dict):
-            raw_params = {}
-        if not event_type.startswith("macd_"):
-            return dict(raw_params)
-        try:
-            fast, slow, signal, profile = extract_macd_params({"params": raw_params})
-            normalized: dict[str, Any] = {
-                "macd_profile": profile,
-                "macd_fast": fast,
-                "macd_slow": slow,
-                "macd_signal": signal,
-            }
-        except Exception:
-            normalized = dict(raw_params)
-        if event_type in MACD_HIST_EXPAND_EVENT_TYPES:
-            try:
-                normalized["hist_expand_bars"] = max(2, int(raw_params.get("hist_expand_bars", 3)))
-            except Exception:
-                normalized["hist_expand_bars"] = 3
-        return normalized
-
-    params_for_compare = comparable_event_params(params)
-
+    params = build_event_params_from_args(event_type, asset_type, args)
     rules = load_event_rules()
-    for existing in rules:
-        existing_params_for_compare = comparable_event_params(existing.get("params", {}))
-        if (
-            bool(existing.get("enabled", True))
-            and str(existing.get("event_type", "")).lower() == event_type
-            and str(existing.get("asset_type", "")).lower() == asset_type
-            and str(existing.get("symbol", "")) == symbol_for_rule
-            and str(existing.get("period", "")) == period
-            and str(existing.get("interval", "")) == interval
-            and int(existing.get("confirm_bars", 1)) == confirm_bars
-            and int(existing.get("cooldown_minutes", 0)) == cooldown_minutes
-            and str(existing.get("dedup_mode", "cross_once")).lower() == dedup_mode
-            and str(existing.get("channel", "")) == str(args.channel or "")
-            and str(existing.get("target", "")) == str(args.target or "")
-            and existing_params_for_compare == params_for_compare
-        ):
-            if args.json:
-                print(json.dumps(existing, ensure_ascii=False, indent=2))
-            else:
-                print(f"EXISTS {existing.get('id')} {event_type} {asset_type} {symbol_for_rule} {period}/{interval}")
-            return 0
-
-    rule = {
-        "id": secrets.token_hex(4),
-        "event_type": event_type,
-        "asset_type": asset_type,
-        "symbol": symbol_for_rule,
-        "quote_symbol": quote_symbol,
-        "period": period,
-        "interval": interval,
-        "confirm_bars": confirm_bars,
-        "cooldown_minutes": cooldown_minutes,
-        "dedup_mode": dedup_mode,
-        "params": params,
-        "channel": args.channel or "",
-        "target": args.target or "",
-        "note": args.note or "",
-        "enabled": True,
-        "created_at": now_iso(),
-    }
-    rules.append(rule)
-    save_event_rules(rules)
+    rule, created = upsert_event_rule(
+        rules=rules,
+        event_type=event_type,
+        asset_type=asset_type,
+        symbol_for_rule=symbol_for_rule,
+        quote_symbol=quote_symbol,
+        period=period,
+        interval=interval,
+        confirm_bars=confirm_bars,
+        cooldown_minutes=cooldown_minutes,
+        dedup_mode=dedup_mode,
+        params=params,
+        channel=str(args.channel or ""),
+        target=str(args.target or ""),
+        note=str(args.note or ""),
+    )
+    if created:
+        save_event_rules(rules)
 
     if args.json:
-        payload = {"rule": rule, "note": auto_note}
+        payload = {"rule": rule, "note": auto_note, "created": bool(created)}
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
+        action = "EVENT_ADDED" if created else "EXISTS"
         dest = f"{rule['channel']}:{rule['target']}" if rule["channel"] and rule["target"] else "local-log-only"
         print(
-            f"EVENT_ADDED {rule['id']} {rule['event_type']} {rule['asset_type']} {rule['symbol']} "
+            f"{action} {rule['id']} {rule['event_type']} {rule['asset_type']} {rule['symbol']} "
             f"tf={rule['period']}/{rule['interval']} confirm={rule['confirm_bars']} cooldown={rule['cooldown_minutes']}m "
             f"dedup={rule['dedup_mode']} -> {dest}"
+        )
+        if auto_note:
+            print(f"NOTE {auto_note}")
+    return 0
+
+
+def build_preset_specs(preset: str, asset_type: str) -> list[dict[str, Any]]:
+    if preset in ("preset_stock_trend", "preset_stock_reversal") and asset_type != "stock":
+        raise ValueError(f"{preset} requires --type stock")
+    if preset in ("preset_crypto_momentum_15m", "preset_crypto_divergence_15m") and asset_type != "crypto":
+        raise ValueError(f"{preset} requires --type crypto")
+
+    bundles: dict[str, list[dict[str, Any]]] = {
+        "preset_stock_trend": [
+            {"event_type": "ma_bull_alignment"},
+            {"event_type": "price_cross_sma20_up"},
+            {"event_type": "ema20_cross_ema50_up"},
+            {"event_type": "bb_squeeze_breakout_up", "params": {"lookback_bars": 20}},
+        ],
+        "preset_stock_reversal": [
+            {"event_type": "rsi_enter_oversold"},
+            {"event_type": "rsi_cross_30_up"},
+            {"event_type": "bb_reenter_from_lower"},
+            {"event_type": "macd_golden_cross"},
+        ],
+        "preset_crypto_momentum_15m": [
+            {"event_type": "macd_golden_cross_above_zero"},
+            {"event_type": "rsi_cross_50_up"},
+            {"event_type": "volume_spike_up"},
+            {"event_type": "breakout_n_bar_high", "params": {"lookback_bars": 20}},
+        ],
+        "preset_crypto_divergence_15m": [
+            {"event_type": "rsi_regular_bull_div"},
+            {"event_type": "macd_regular_bull_div"},
+            {"event_type": "obv_regular_bull_div"},
+            {"event_type": "rsi_hidden_bull_div"},
+        ],
+        "preset_fib_pullback": [
+            {"event_type": "fib_touch_0_5"},
+            {"event_type": "fib_touch_0_618"},
+            {"event_type": "fib_reject_0_618_up"},
+        ],
+        "preset_breakout_follow": [
+            {"event_type": "breakout_n_bar_high", "params": {"lookback_bars": 20}},
+            {"event_type": "donchian_breakout_up", "params": {"lookback_bars": 20}},
+            {"event_type": "volume_spike_up"},
+        ],
+    }
+    return bundles[preset]
+
+
+def cmd_event_install_preset(args: argparse.Namespace) -> int:
+    ensure_state_dir()
+    if bool(args.channel) ^ bool(args.target):
+        raise ValueError("--channel and --target must be provided together")
+
+    preset = str(args.preset).strip()
+    if preset not in EVENT_PRESET_CHOICES:
+        raise ValueError(f"--preset must be one of: {', '.join(EVENT_PRESET_CHOICES)}")
+
+    asset_type = str(args.type).strip().lower()
+    if asset_type == "auto":
+        asset_type = resolve_asset_type(args.symbol)
+    if asset_type not in ("crypto", "stock"):
+        raise ValueError("--type must resolve to crypto or stock")
+
+    period, interval = resolve_event_defaults(asset_type, args.period, args.interval)
+    if preset in ("preset_stock_trend", "preset_stock_reversal"):
+        period = period or "6mo"
+        interval = interval or "1d"
+    if preset in ("preset_crypto_momentum_15m", "preset_crypto_divergence_15m"):
+        period = period or "5d"
+        interval = interval or "15m"
+    period, interval, auto_note = validate_chart_period_interval(asset_type, period, interval)
+
+    symbol_for_rule, quote_symbol = normalize_event_symbol(asset_type, args.symbol)
+    confirm_bars = max(1, int(args.confirm_bars))
+    cooldown_minutes = max(0, int(args.cooldown_minutes))
+    dedup_mode = str(args.dedup_mode).strip().lower()
+
+    specs = build_preset_specs(preset, asset_type)
+    rules = load_event_rules()
+    created_count = 0
+    out_rules: list[dict[str, Any]] = []
+    for spec in specs:
+        event_type = str(spec["event_type"]).strip().lower()
+        raw_params: dict[str, Any] = {}
+        if event_type in MACD_EVENT_WITH_PROFILE_TYPES:
+            raw_params.update(resolve_macd_profile_params(asset_type, args.macd_profile, args.macd_fast, args.macd_slow, args.macd_signal))
+        raw_params.update(spec.get("params", {}))
+        raw_params.update(
+            {
+                "severity": str(args.severity),
+                "attach_chart": bool(args.attach_chart),
+                "snapshot_chart_type": str(args.snapshot_chart_type),
+                "snapshot_width": float(args.snapshot_width),
+                "snapshot_height": float(args.snapshot_height),
+                "snapshot_dpi": int(args.snapshot_dpi),
+                "lookback_bars": int(args.lookback_bars),
+                "bb_width_threshold": float(args.bb_width_threshold),
+                "volume_spike_multiplier": float(args.volume_spike_multiplier),
+                "volume_dry_threshold": float(args.volume_dry_threshold),
+                "fib_anchor_bars": int(args.fib_anchor_bars),
+                "fib_touch_tolerance": float(args.fib_touch_tolerance),
+                "pivot_left": int(args.pivot_left),
+                "pivot_right": int(args.pivot_right),
+                "min_pivot_gap": int(args.min_pivot_gap),
+                "max_pivot_gap": int(args.max_pivot_gap),
+                "min_price_delta_pct": float(args.min_price_delta_pct),
+                "min_indicator_delta": float(args.min_indicator_delta),
+                "dedup_window_bars": int(args.dedup_window_bars),
+                "hist_expand_bars": int(args.hist_expand_bars),
+            }
+        )
+        params = normalize_event_params_for_compare(event_type, raw_params)
+        rule, created = upsert_event_rule(
+            rules=rules,
+            event_type=event_type,
+            asset_type=asset_type,
+            symbol_for_rule=symbol_for_rule,
+            quote_symbol=quote_symbol,
+            period=period,
+            interval=interval,
+            confirm_bars=confirm_bars,
+            cooldown_minutes=cooldown_minutes,
+            dedup_mode=dedup_mode,
+            params=params,
+            channel=str(args.channel or ""),
+            target=str(args.target or ""),
+            note=str(args.note or f"preset={preset}"),
+        )
+        if created:
+            created_count += 1
+        out_rules.append(rule)
+
+    save_event_rules(rules)
+    payload = {
+        "preset": preset,
+        "asset_type": asset_type,
+        "symbol": symbol_for_rule,
+        "period": period,
+        "interval": interval,
+        "created": created_count,
+        "total": len(out_rules),
+        "note": auto_note,
+        "rules": out_rules,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"PRESET_INSTALLED preset={preset} symbol={symbol_for_rule} tf={period}/{interval} "
+            f"created={created_count} total={len(out_rules)}"
         )
         if auto_note:
             print(f"NOTE {auto_note}")
@@ -2133,12 +3488,12 @@ def cmd_event_list(args: argparse.Namespace) -> int:
         print("No event rules configured.")
         return 0
 
-    print("ID       EVENT_TYPE            TYPE    SYMBOL     TF               CONF  CD(min)  DEDUP       DESTINATION              ENABLED")
+    print("ID       EVENT_TYPE                      TYPE    SYMBOL     TF               CONF  CD(min)  DEDUP       DESTINATION              ENABLED")
     for rule in rules:
         tf = f"{rule.get('period')}/{rule.get('interval')}"
         dest = f"{rule.get('channel')}:{rule.get('target')}" if rule.get("channel") and rule.get("target") else "local-log-only"
         print(
-            f"{str(rule.get('id','')):8} {str(rule.get('event_type','')):20} {str(rule.get('asset_type','')):7} "
+            f"{str(rule.get('id','')):8} {str(rule.get('event_type','')):30} {str(rule.get('asset_type','')):7} "
             f"{str(rule.get('symbol','')):10} {tf:16} {int(rule.get('confirm_bars',1)):4}  "
             f"{int(rule.get('cooldown_minutes',0)):7}  {str(rule.get('dedup_mode','cross_once')):10} "
             f"{dest:24} {str(rule.get('enabled', True))}"
@@ -2193,11 +3548,36 @@ def cmd_event_check(args: argparse.Namespace) -> int:
                 cooldown_ok = can_trigger_with_cooldown(str(previous.get("last_triggered_at", "")), cooldown_minutes)
                 should_notify = base_trigger and cooldown_ok
 
+                event_type = str(rule.get("event_type", "")).strip().lower()
+                params = normalize_event_params_for_compare(event_type, rule.get("params", {}))
+
                 message = ""
                 delivered = False
+                snapshot_path = ""
                 if should_notify:
                     message = format_event_message(rule, evaluation)
-                    delivered = send_notification(rule, message, dry_run=args.dry_run, quiet=args.quiet)
+                    attach_chart = bool(params.get("attach_chart", False))
+                    if attach_chart:
+                        try:
+                            snap_path = build_event_snapshot(rule, evaluation)
+                            snapshot_path = str(snap_path)
+                            if rule.get("channel") and rule.get("target"):
+                                delivered = send_media_notification(
+                                    str(rule.get("channel")),
+                                    str(rule.get("target")),
+                                    message,
+                                    snap_path,
+                                    dry_run=args.dry_run,
+                                )
+                            else:
+                                delivered = send_notification(rule, message, dry_run=args.dry_run, quiet=args.quiet)
+                                if not args.quiet:
+                                    print(f"SNAPSHOT  id={rule_id} path={snapshot_path}")
+                        except Exception as snap_exc:
+                            message = f"{message} snapshot_error={snap_exc}"
+                            delivered = send_notification(rule, message, dry_run=args.dry_run, quiet=args.quiet)
+                    else:
+                        delivered = send_notification(rule, message, dry_run=args.dry_run, quiet=args.quiet)
                     triggered += 1
 
                 chart = evaluation.get("chart", {})
@@ -2211,6 +3591,7 @@ def cmd_event_check(args: argparse.Namespace) -> int:
                     "last_detail": detail,
                     "last_triggered_at": now_iso() if should_notify else previous.get("last_triggered_at", ""),
                     "last_delivery_ok": delivered if should_notify else previous.get("last_delivery_ok"),
+                    "last_snapshot_path": snapshot_path if should_notify else previous.get("last_snapshot_path", ""),
                 }
 
                 row = {
@@ -2224,6 +3605,7 @@ def cmd_event_check(args: argparse.Namespace) -> int:
                     "checked_at": chart.get("checked_at", now_iso()),
                     "error": "",
                     "detail": detail,
+                    "snapshot_path": snapshot_path,
                 }
                 results.append(row)
 
@@ -2242,6 +3624,8 @@ def cmd_event_check(args: argparse.Namespace) -> int:
                     )
                     if should_notify and message:
                         print(f"MESSAGE   {message}")
+                    if should_notify and snapshot_path:
+                        print(f"SNAPSHOT  {snapshot_path}")
 
             except Exception as exc:
                 errors += 1
@@ -2254,6 +3638,7 @@ def cmd_event_check(args: argparse.Namespace) -> int:
                     "last_detail": previous.get("last_detail", {}),
                     "last_triggered_at": previous.get("last_triggered_at", ""),
                     "last_delivery_ok": previous.get("last_delivery_ok"),
+                    "last_snapshot_path": previous.get("last_snapshot_path", ""),
                 }
                 results.append(
                     {
@@ -2267,6 +3652,7 @@ def cmd_event_check(args: argparse.Namespace) -> int:
                         "checked_at": now_iso(),
                         "error": str(exc),
                         "detail": {},
+                        "snapshot_path": "",
                     }
                 )
                 if not args.quiet:
@@ -2295,6 +3681,84 @@ def cmd_event_check(args: argparse.Namespace) -> int:
             lock_handle.close()
         except Exception:
             pass
+
+
+def cmd_event_backtest(args: argparse.Namespace) -> int:
+    rules = load_event_rules()
+    rule_id = str(args.rule_id)
+    rule = next((r for r in rules if str(r.get("id")) == rule_id), None)
+    if rule is None:
+        raise ValueError(f"rule id not found: {rule_id}")
+
+    asset_type = str(rule.get("asset_type", "")).strip().lower()
+    period = str(rule.get("period", "")).strip()
+    interval = str(rule.get("interval", "")).strip()
+    symbol = str(rule.get("quote_symbol") or rule.get("symbol") or "").strip()
+    if not symbol:
+        raise RuntimeError("selected rule has empty symbol")
+
+    chart_payload = fetch_chart_data(asset_type, symbol, period, interval)
+    candles_all = list(chart_payload["candles"])
+    if len(candles_all) < 5:
+        raise RuntimeError("not enough candles for backtest")
+
+    max_bars = parse_int(args.max_bars, len(candles_all), min_value=5, max_value=len(candles_all))
+    candles = candles_all[-max_bars:]
+
+    simulated_payload = dict(chart_payload)
+    dedup_mode = str(rule.get("dedup_mode", "cross_once")).strip().lower()
+    prev_condition = False
+    trigger_points: list[dict[str, Any]] = []
+    errors = 0
+
+    for idx in range(4, len(candles)):
+        partial = dict(simulated_payload)
+        partial["candles"] = candles[: idx + 1]
+        dt = partial["candles"][-1]["dt"]
+        partial["as_of"] = dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        partial["checked_at"] = partial["as_of"]
+        try:
+            evaluation = evaluate_event_rule_on_chart(rule, partial)
+            condition_now = bool(evaluation.get("condition", False))
+            should_trigger = condition_now and (dedup_mode == "continuous" or not prev_condition)
+            if should_trigger:
+                trigger_points.append(
+                    {
+                        "index": idx,
+                        "as_of": partial["as_of"],
+                        "event_type": rule.get("event_type"),
+                        "condition": condition_now,
+                        "detail": evaluation.get("detail", {}),
+                    }
+                )
+            prev_condition = condition_now
+        except Exception:
+            errors += 1
+
+    summary = {
+        "rule_id": rule_id,
+        "event_type": rule.get("event_type"),
+        "symbol": chart_payload["symbol"],
+        "timeframe": f"{period}/{interval}",
+        "bars_used": len(candles),
+        "trigger_count": len(trigger_points),
+        "errors": errors,
+        "first_trigger_as_of": trigger_points[0]["as_of"] if trigger_points else "",
+        "last_trigger_as_of": trigger_points[-1]["as_of"] if trigger_points else "",
+    }
+
+    if args.json:
+        print(json.dumps({"summary": summary, "triggers": trigger_points}, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"BACKTEST rule={rule_id} event={rule.get('event_type')} symbol={chart_payload['symbol']} "
+            f"tf={period}/{interval} bars={len(candles)} triggers={len(trigger_points)} errors={errors}"
+        )
+        for row in trigger_points[:20]:
+            print(f"TRIGGER  idx={row['index']} as_of={row['as_of']}")
+        if len(trigger_points) > 20:
+            print(f"... and {len(trigger_points) - 20} more triggers")
+    return 0
 
 
 def cmd_install_cron(args: argparse.Namespace) -> int:
@@ -2528,12 +3992,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_event_add.add_argument("--interval", default="", help="Rule timeframe interval")
     p_event_add.add_argument("--confirm-bars", type=int, default=1, help="Require signal confirmation over N bars")
     p_event_add.add_argument("--hist-expand-bars", type=int, default=3, help="Bars used by MACD histogram expansion events (>=2)")
+    p_event_add.add_argument("--lookback-bars", type=int, default=20, help="Lookback bars for breakout/squeeze/volume events")
+    p_event_add.add_argument("--bb-width-threshold", type=float, default=0.06, help="BB squeeze threshold (bandwidth ratio)")
+    p_event_add.add_argument("--volume-spike-multiplier", type=float, default=1.8, help="Volume spike multiplier vs MA20")
+    p_event_add.add_argument("--volume-dry-threshold", type=float, default=0.6, help="Volume dry-up threshold vs MA20")
+    p_event_add.add_argument("--fib-anchor-bars", type=int, default=120, help="Fibonacci anchor lookback bars")
+    p_event_add.add_argument("--fib-touch-tolerance", type=float, default=0.002, help="Fibonacci touch tolerance ratio")
+    p_event_add.add_argument("--pivot-left", type=int, default=3, help="Pivot left bars for swing/divergence")
+    p_event_add.add_argument("--pivot-right", type=int, default=3, help="Pivot right bars for swing/divergence")
+    p_event_add.add_argument("--min-pivot-gap", type=int, default=5, help="Minimum bars between two pivots")
+    p_event_add.add_argument("--max-pivot-gap", type=int, default=120, help="Maximum bars between two pivots")
+    p_event_add.add_argument("--min-price-delta-pct", type=float, default=0.3, help="Minimum price delta percent for divergence")
+    p_event_add.add_argument("--min-indicator-delta", type=float, default=0.1, help="Minimum indicator delta for divergence")
+    p_event_add.add_argument("--dedup-window-bars", type=int, default=20, help="Recent-window bars for divergence re-arm")
     p_event_add.add_argument("--cooldown-minutes", type=int, default=60, help="Minimum minutes between triggers")
     p_event_add.add_argument("--dedup-mode", choices=["cross_once", "continuous"], default="cross_once")
     p_event_add.add_argument("--macd-profile", choices=["auto", "standard", "fast_crypto", "slow_trend", "user_7_10_30", "custom"], default="auto")
     p_event_add.add_argument("--macd-fast", type=int, default=None)
     p_event_add.add_argument("--macd-slow", type=int, default=None)
     p_event_add.add_argument("--macd-signal", type=int, default=None)
+    p_event_add.add_argument("--severity", choices=EVENT_SEVERITY_CHOICES, default="auto")
+    p_event_add.add_argument("--attach-chart", action="store_true", help="Attach chart snapshot on trigger")
+    p_event_add.add_argument("--snapshot-chart-type", choices=["candlestick", "line"], default="candlestick")
+    p_event_add.add_argument("--snapshot-width", type=float, default=14.0)
+    p_event_add.add_argument("--snapshot-height", type=float, default=8.0)
+    p_event_add.add_argument("--snapshot-dpi", type=int, default=150)
     p_event_add.add_argument("--channel", default="", help="message channel, e.g. telegram")
     p_event_add.add_argument("--target", default="", help="channel target, e.g. @name or chat id")
     p_event_add.add_argument("--note", default="")
@@ -2554,6 +4037,51 @@ def build_parser() -> argparse.ArgumentParser:
     p_event_check.add_argument("--json", action="store_true")
     p_event_check.add_argument("--fail-on-error", action="store_true")
     p_event_check.set_defaults(func=cmd_event_check)
+
+    p_event_backtest = sub.add_parser("event-backtest", help="Backtest one event rule on historical candles")
+    p_event_backtest.add_argument("--rule-id", required=True, help="Event rule id from event-list")
+    p_event_backtest.add_argument("--max-bars", type=int, default=500, help="Maximum latest bars to simulate")
+    p_event_backtest.add_argument("--json", action="store_true")
+    p_event_backtest.set_defaults(func=cmd_event_backtest)
+
+    p_event_preset = sub.add_parser("event-install-preset", help="Install a preset bundle of event rules (idempotent)")
+    p_event_preset.add_argument("--preset", choices=EVENT_PRESET_CHOICES, required=True)
+    p_event_preset.add_argument("--type", choices=["auto", "crypto", "stock"], default="auto")
+    p_event_preset.add_argument("--symbol", required=True)
+    p_event_preset.add_argument("--period", default="")
+    p_event_preset.add_argument("--interval", default="")
+    p_event_preset.add_argument("--confirm-bars", type=int, default=1)
+    p_event_preset.add_argument("--hist-expand-bars", type=int, default=3)
+    p_event_preset.add_argument("--lookback-bars", type=int, default=20)
+    p_event_preset.add_argument("--bb-width-threshold", type=float, default=0.06)
+    p_event_preset.add_argument("--volume-spike-multiplier", type=float, default=1.8)
+    p_event_preset.add_argument("--volume-dry-threshold", type=float, default=0.6)
+    p_event_preset.add_argument("--fib-anchor-bars", type=int, default=120)
+    p_event_preset.add_argument("--fib-touch-tolerance", type=float, default=0.002)
+    p_event_preset.add_argument("--pivot-left", type=int, default=3)
+    p_event_preset.add_argument("--pivot-right", type=int, default=3)
+    p_event_preset.add_argument("--min-pivot-gap", type=int, default=5)
+    p_event_preset.add_argument("--max-pivot-gap", type=int, default=120)
+    p_event_preset.add_argument("--min-price-delta-pct", type=float, default=0.3)
+    p_event_preset.add_argument("--min-indicator-delta", type=float, default=0.1)
+    p_event_preset.add_argument("--dedup-window-bars", type=int, default=20)
+    p_event_preset.add_argument("--cooldown-minutes", type=int, default=60)
+    p_event_preset.add_argument("--dedup-mode", choices=["cross_once", "continuous"], default="cross_once")
+    p_event_preset.add_argument("--macd-profile", choices=["auto", "standard", "fast_crypto", "slow_trend", "user_7_10_30", "custom"], default="auto")
+    p_event_preset.add_argument("--macd-fast", type=int, default=None)
+    p_event_preset.add_argument("--macd-slow", type=int, default=None)
+    p_event_preset.add_argument("--macd-signal", type=int, default=None)
+    p_event_preset.add_argument("--severity", choices=EVENT_SEVERITY_CHOICES, default="auto")
+    p_event_preset.add_argument("--attach-chart", action="store_true")
+    p_event_preset.add_argument("--snapshot-chart-type", choices=["candlestick", "line"], default="candlestick")
+    p_event_preset.add_argument("--snapshot-width", type=float, default=14.0)
+    p_event_preset.add_argument("--snapshot-height", type=float, default=8.0)
+    p_event_preset.add_argument("--snapshot-dpi", type=int, default=150)
+    p_event_preset.add_argument("--channel", default="")
+    p_event_preset.add_argument("--target", default="")
+    p_event_preset.add_argument("--note", default="")
+    p_event_preset.add_argument("--json", action="store_true")
+    p_event_preset.set_defaults(func=cmd_event_install_preset)
 
     p_install = sub.add_parser("install-cron", help="Install managed crontab entry")
     p_install.add_argument("--minutes", type=int, default=5, help="check interval in minutes (1..59)")
