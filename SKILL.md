@@ -132,7 +132,7 @@ python3 {baseDir}/scripts/market_alert.py event-add \
 
 ```bash
 python3 {baseDir}/scripts/market_alert.py event-list
-python3 {baseDir}/scripts/market_alert.py event-check --dry-run --show-metrics
+python3 {baseDir}/scripts/market_alert.py event-check --dry-run --show-metrics --prefetch-workers 4
 python3 {baseDir}/scripts/market_alert.py event-check
 python3 {baseDir}/scripts/market_alert.py event-backtest --rule-id <rule_id> --max-bars 400
 python3 {baseDir}/scripts/market_alert.py event-rm <rule_id>
@@ -247,9 +247,14 @@ Action sequence:
 - `event-check` uses separate lock protection to avoid duplicate event triggers.
 - `event-check` reuses shared chart cache per symbol/timeframe to reduce duplicated fetches.
 - `event-check --show-metrics` prints cache reuse and duration metrics in text mode.
+- `event-check --prefetch-workers` controls cache prefetch concurrency.
 - `event-backtest` provides deterministic historical replay for one saved event rule.
 - `event-install-preset` installs event bundles idempotently.
 - Event notifications support standardized severity tags and optional chart snapshots.
+- HTTP requests use retry + pacing safeguards; tune with env vars:
+  - `OPENCLAW_HTTP_MAX_RETRIES`
+  - `OPENCLAW_HTTP_RETRY_BASE_SECONDS`
+  - `OPENCLAW_HTTP_MIN_INTERVAL_SECONDS`
 - Cron environments may have minimal PATH; script auto-resolves `openclaw` binary and supports `OPENCLAW_BIN` override.
 - Chart/report requires `matplotlib`; if missing, use venv install.
 

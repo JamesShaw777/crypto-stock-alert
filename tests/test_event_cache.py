@@ -78,6 +78,35 @@ class TestEventChartCache(unittest.TestCase):
         self.assertEqual(metrics["chart_cache_fetches"], 2)
         self.assertEqual(metrics["chart_cache_reused_rules"], 1)
         self.assertEqual(metrics["chart_cache_failures"], 0)
+        self.assertEqual(metrics["chart_cache_unique_keys"], 2)
+
+    def test_with_workers_exposes_prefetch_metrics(self):
+        rules = [
+            self._rule("r1", "BTC-USD"),
+            self._rule("r2", "ETH-USD"),
+        ]
+
+        def fake_fetch(asset_type, chart_symbol, period, interval):
+            return {
+                "asset_type": asset_type,
+                "input_symbol": chart_symbol,
+                "symbol": chart_symbol,
+                "period": period,
+                "interval": interval,
+                "source": "fake",
+                "provider": "fake",
+                "as_of": "2026-03-02T00:00:00Z",
+                "checked_at": "2026-03-02T00:00:00Z",
+                "candles": [],
+            }
+
+        with mock.patch.object(self.mod, "fetch_chart_data", side_effect=fake_fetch):
+            _, _, _, metrics = self.mod.build_event_chart_cache_with_workers(rules, prefetch_workers=8)
+
+        self.assertEqual(metrics["chart_cache_prefetch_workers"], 8)
+        self.assertEqual(metrics["chart_cache_unique_keys"], 2)
+        self.assertEqual(metrics["chart_cache_fetches"], 2)
+        self.assertIn("chart_cache_prefetch_duration_ms", metrics)
 
 
 if __name__ == "__main__":

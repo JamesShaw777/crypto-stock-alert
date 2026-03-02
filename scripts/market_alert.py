@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import threading
 import fcntl
 import json
 import math
@@ -25,14 +26,52 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 DEFAULT_TIMEOUT_SECONDS = 12
+
+
+def env_int(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        out = int(raw) if raw else int(default)
+    except Exception:
+        out = int(default)
+    if min_value is not None and out < min_value:
+        out = min_value
+    if max_value is not None and out > max_value:
+        out = max_value
+    return out
+
+
+def env_float(name: str, default: float, min_value: float | None = None, max_value: float | None = None) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        out = float(raw) if raw else float(default)
+    except Exception:
+        out = float(default)
+    if min_value is not None and out < min_value:
+        out = min_value
+    if max_value is not None and out > max_value:
+        out = max_value
+    return out
+
+
+DEFAULT_EVENT_PREFETCH_WORKERS = env_int("OPENCLAW_EVENT_PREFETCH_WORKERS", 4, min_value=1, max_value=32)
+HTTP_MAX_RETRIES = env_int("OPENCLAW_HTTP_MAX_RETRIES", 2, min_value=0, max_value=8)
+HTTP_RETRY_BASE_SECONDS = env_float("OPENCLAW_HTTP_RETRY_BASE_SECONDS", 0.4, min_value=0.0, max_value=10.0)
+HTTP_MIN_INTERVAL_SECONDS = env_float("OPENCLAW_HTTP_MIN_INTERVAL_SECONDS", 0.12, min_value=0.0, max_value=5.0)
+HTTP_RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
+HTTP_MAX_BACKOFF_SECONDS = 8.0
+_HTTP_THROTTLE_LOCK = threading.Lock()
+_HTTP_NEXT_ALLOWED_AT = 0.0
 
 DEFAULT_STATE_DIR = Path.home() / ".openclaw" / "skills-data" / "crypto-stock-alert"
 STATE_DIR = Path(os.environ.get("OPENCLAW_MARKET_ALERT_STATE_DIR", str(DEFAULT_STATE_DIR))).expanduser()
@@ -330,29 +369,73 @@ def save_event_status(conditions: dict[str, Any]) -> None:
     write_json(EVENT_STATUS_FILE, {"conditions": conditions})
 
 
-def http_get_json(url: str, headers: dict[str, str] | None = None) -> Any:
+def throttle_http_request() -> None:
+    if HTTP_MIN_INTERVAL_SECONDS <= 0:
+        return
+    global _HTTP_NEXT_ALLOWED_AT
+    with _HTTP_THROTTLE_LOCK:
+        now = time.monotonic()
+        wait_seconds = _HTTP_NEXT_ALLOWED_AT - now
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+            now = time.monotonic()
+        _HTTP_NEXT_ALLOWED_AT = max(now, _HTTP_NEXT_ALLOWED_AT) + HTTP_MIN_INTERVAL_SECONDS
+
+
+def http_backoff_seconds(attempt: int) -> float:
+    return min(HTTP_RETRY_BASE_SECONDS * (2**attempt), HTTP_MAX_BACKOFF_SECONDS)
+
+
+def http_get_bytes(url: str, headers: dict[str, str] | None = None) -> bytes:
     merged_headers = {
         "User-Agent": USER_AGENT,
+        "Accept": "*/*",
+    }
+    if headers:
+        merged_headers.update(headers)
+
+    last_exc: Exception | None = None
+    attempts = max(0, HTTP_MAX_RETRIES) + 1
+    for attempt in range(attempts):
+        throttle_http_request()
+        req = Request(url, headers=merged_headers)
+        try:
+            with urlopen(req, timeout=DEFAULT_TIMEOUT_SECONDS) as resp:
+                return resp.read()
+        except HTTPError as exc:
+            last_exc = exc
+            status = int(getattr(exc, "code", 0) or 0)
+            if status in HTTP_RETRY_STATUS_CODES and attempt < attempts - 1:
+                time.sleep(http_backoff_seconds(attempt))
+                continue
+            raise RuntimeError(f"http error status={status} url={url}") from exc
+        except (URLError, TimeoutError) as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(http_backoff_seconds(attempt))
+                continue
+            raise RuntimeError(f"network error url={url}: {exc}") from exc
+
+    raise RuntimeError(f"request failed url={url}: {last_exc}")
+
+
+def http_get_json(url: str, headers: dict[str, str] | None = None) -> Any:
+    merged_headers = {
         "Accept": "application/json,text/plain,*/*",
     }
     if headers:
         merged_headers.update(headers)
-    req = Request(url, headers=merged_headers)
-    with urlopen(req, timeout=DEFAULT_TIMEOUT_SECONDS) as resp:
-        text = resp.read().decode("utf-8")
+    text = http_get_bytes(url, merged_headers).decode("utf-8")
     return json.loads(text)
 
 
 def http_get_text(url: str, headers: dict[str, str] | None = None) -> str:
     merged_headers = {
-        "User-Agent": USER_AGENT,
         "Accept": "text/plain,text/csv,*/*",
     }
     if headers:
         merged_headers.update(headers)
-    req = Request(url, headers=merged_headers)
-    with urlopen(req, timeout=DEFAULT_TIMEOUT_SECONDS) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+    return http_get_bytes(url, merged_headers).decode("utf-8", errors="replace")
 
 
 def normalize_crypto_symbol(raw: str) -> tuple[str, str]:
@@ -2836,16 +2919,26 @@ def evaluate_event_rule(rule: dict[str, Any]) -> dict[str, Any]:
 
 def build_event_chart_cache(
     rules: list[dict[str, Any]],
-) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, Any]], dict[str, str], dict[str, int]]:
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, Any]], dict[str, str], dict[str, Any]]:
+    return build_event_chart_cache_with_workers(rules, prefetch_workers=DEFAULT_EVENT_PREFETCH_WORKERS)
+
+
+def build_event_chart_cache_with_workers(
+    rules: list[dict[str, Any]],
+    prefetch_workers: int,
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, Any]], dict[str, str], dict[str, Any]]:
+    started = time.perf_counter()
     rule_ctx_by_id: dict[str, dict[str, str]] = {}
     chart_cache: dict[str, dict[str, Any]] = {}
     chart_cache_error: dict[str, str] = {}
+    unique_ctx_by_key: dict[str, dict[str, str]] = {}
 
     enabled_rules = 0
     reused_rules = 0
     fetches = 0
     failures = 0
 
+    workers = max(1, int(prefetch_workers))
     for rule in rules:
         if not bool(rule.get("enabled", True)):
             continue
@@ -2855,25 +2948,50 @@ def build_event_chart_cache(
             ctx = resolve_event_rule_chart_context(rule)
             rule_ctx_by_id[rule_id] = ctx
             key = ctx["key"]
-            if key in chart_cache or key in chart_cache_error:
+            if key in unique_ctx_by_key:
                 reused_rules += 1
                 continue
-            try:
-                chart_cache[key] = fetch_chart_data(ctx["asset_type"], ctx["chart_symbol"], ctx["period"], ctx["interval"])
-                fetches += 1
-            except Exception as exc:
-                chart_cache_error[key] = str(exc)
-                failures += 1
+            unique_ctx_by_key[key] = ctx
         except Exception as exc:
             chart_cache_error[f"rule:{rule_id}"] = str(exc)
             failures += 1
 
+    keys = list(unique_ctx_by_key.keys())
+    if keys:
+        if workers == 1 or len(keys) == 1:
+            for key in keys:
+                ctx = unique_ctx_by_key[key]
+                try:
+                    chart_cache[key] = fetch_chart_data(ctx["asset_type"], ctx["chart_symbol"], ctx["period"], ctx["interval"])
+                    fetches += 1
+                except Exception as exc:
+                    chart_cache_error[key] = str(exc)
+                    failures += 1
+        else:
+            thread_workers = min(workers, len(keys))
+            with ThreadPoolExecutor(max_workers=thread_workers) as pool:
+                fut_to_key = {
+                    pool.submit(fetch_chart_data, unique_ctx_by_key[key]["asset_type"], unique_ctx_by_key[key]["chart_symbol"], unique_ctx_by_key[key]["period"], unique_ctx_by_key[key]["interval"]): key
+                    for key in keys
+                }
+                for fut in as_completed(fut_to_key):
+                    key = fut_to_key[fut]
+                    try:
+                        chart_cache[key] = fut.result()
+                        fetches += 1
+                    except Exception as exc:
+                        chart_cache_error[key] = str(exc)
+                        failures += 1
+
     metrics = {
         "enabled_rules": enabled_rules,
         "chart_cache_keys": len(chart_cache),
+        "chart_cache_unique_keys": len(unique_ctx_by_key),
         "chart_cache_fetches": fetches,
         "chart_cache_failures": failures,
         "chart_cache_reused_rules": reused_rules,
+        "chart_cache_prefetch_workers": workers,
+        "chart_cache_prefetch_duration_ms": int((time.perf_counter() - started) * 1000),
     }
     return rule_ctx_by_id, chart_cache, chart_cache_error, metrics
 
@@ -3588,7 +3706,9 @@ def cmd_event_check(args: argparse.Namespace) -> int:
         checked = 0
         errors = 0
         results: list[dict[str, Any]] = []
-        rule_ctx_by_id, chart_cache, chart_cache_error, cache_metrics = build_event_chart_cache(rules)
+        rule_ctx_by_id, chart_cache, chart_cache_error, cache_metrics = build_event_chart_cache_with_workers(
+            rules, prefetch_workers=int(args.prefetch_workers)
+        )
 
         for rule in rules:
             if not bool(rule.get("enabled", True)):
@@ -3748,10 +3868,13 @@ def cmd_event_check(args: argparse.Namespace) -> int:
                 print(
                     "METRICS   "
                     f"duration_ms={summary['duration_ms']} "
+                    f"unique_keys={summary['chart_cache_unique_keys']} "
                     f"cache_keys={summary['chart_cache_keys']} "
                     f"cache_fetches={summary['chart_cache_fetches']} "
                     f"cache_failures={summary['chart_cache_failures']} "
-                    f"cache_reused_rules={summary['chart_cache_reused_rules']}"
+                    f"cache_reused_rules={summary['chart_cache_reused_rules']} "
+                    f"prefetch_workers={summary['chart_cache_prefetch_workers']} "
+                    f"prefetch_ms={summary['chart_cache_prefetch_duration_ms']}"
                 )
 
         if errors > 0 and args.fail_on_error:
@@ -4122,6 +4245,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_event_check.add_argument("--quiet", action="store_true")
     p_event_check.add_argument("--json", action="store_true")
     p_event_check.add_argument("--show-metrics", action="store_true", help="Print cache/duration metrics in text mode")
+    p_event_check.add_argument(
+        "--prefetch-workers",
+        type=int,
+        default=DEFAULT_EVENT_PREFETCH_WORKERS,
+        help="Chart prefetch worker threads (default from OPENCLAW_EVENT_PREFETCH_WORKERS or 4)",
+    )
     p_event_check.add_argument("--fail-on-error", action="store_true")
     p_event_check.set_defaults(func=cmd_event_check)
 

@@ -295,7 +295,7 @@ python3 scripts/market_alert.py event-rm <RULE_ID>
 ### `event-check`
 
 ```bash
-python3 scripts/market_alert.py event-check [--dry-run] [--quiet] [--json] [--show-metrics] [--fail-on-error]
+python3 scripts/market_alert.py event-check [--dry-run] [--quiet] [--json] [--show-metrics] [--prefetch-workers N] [--fail-on-error]
 ```
 
 ### `event-backtest`
@@ -424,6 +424,14 @@ Event reminders follow rule-level dedup/cooldown settings:
 - `--attach-chart`: generate and send chart snapshot together with event message
 - Event checks reuse shared chart cache per `asset+symbol+timeframe` key to reduce duplicate API fetches
 - Use `event-check --show-metrics` (text mode) or `event-check --json` to view cache/duration metrics
+- Tune prefetch concurrency with `--prefetch-workers` (or `OPENCLAW_EVENT_PREFETCH_WORKERS`)
+- HTTP layer includes retry + pacing safeguards for 429/5xx/network bursts
+
+Optional network tuning env vars:
+
+- `OPENCLAW_HTTP_MAX_RETRIES` (default `2`)
+- `OPENCLAW_HTTP_RETRY_BASE_SECONDS` (default `0.4`)
+- `OPENCLAW_HTTP_MIN_INTERVAL_SECONDS` (default `0.12`)
 
 `event-check` is lock-protected (`event_check.lock`) to avoid duplicate triggers under concurrent execution.
 

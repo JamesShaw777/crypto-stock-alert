@@ -123,7 +123,7 @@ python3 scripts/market_alert.py event-install-preset --preset preset_crypto_mome
 # 回放：对某条规则做历史回测
 python3 scripts/market_alert.py event-backtest --rule-id <RULE_ID> --max-bars 400
 
-python3 scripts/market_alert.py event-check --dry-run --show-metrics
+python3 scripts/market_alert.py event-check --dry-run --show-metrics --prefetch-workers 4
 python3 scripts/market_alert.py event-list
 ```
 
@@ -132,3 +132,8 @@ python3 scripts/market_alert.py event-list
 - 告警模块仅依赖 Python 标准库
 - 生图模块需 `matplotlib`，建议使用 venv 安装
 - `event-check` 会按 `asset+symbol+timeframe` 复用行情缓存，减少重复请求
+- `event-check --prefetch-workers` 可调整预取并发
+- HTTP 请求带有重试 + 限流保护（可用环境变量调参）：
+  - `OPENCLAW_HTTP_MAX_RETRIES`
+  - `OPENCLAW_HTTP_RETRY_BASE_SECONDS`
+  - `OPENCLAW_HTTP_MIN_INTERVAL_SECONDS`
