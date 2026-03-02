@@ -2617,18 +2617,47 @@ def resolve_snapshot_flags_for_event(event_type: str) -> dict[str, bool]:
     return flags
 
 
-def build_event_snapshot(rule: dict[str, Any], evaluation: dict[str, Any]) -> Path:
+def resolve_event_rule_chart_context(rule: dict[str, Any]) -> dict[str, str]:
+    event_type = str(rule.get("event_type", "")).strip().lower()
+    if event_type not in EVENT_TYPE_CHOICES:
+        raise RuntimeError(f"unsupported event type: {event_type}")
+
+    asset_type = str(rule.get("asset_type", "")).strip().lower()
+    if asset_type not in ("crypto", "stock"):
+        raise RuntimeError(f"invalid asset type in rule: {asset_type}")
+
+    period = str(rule.get("period", "")).strip()
+    interval = str(rule.get("interval", "")).strip()
+    period, interval, _ = validate_chart_period_interval(asset_type, period, interval)
+
+    chart_symbol = str(rule.get("quote_symbol") or rule.get("symbol") or "").strip()
+    if not chart_symbol:
+        raise RuntimeError("event rule missing symbol")
+
+    key = f"{asset_type}|{chart_symbol}|{period}|{interval}"
+    return {
+        "asset_type": asset_type,
+        "period": period,
+        "interval": interval,
+        "chart_symbol": chart_symbol,
+        "key": key,
+    }
+
+
+def build_event_snapshot(
+    rule: dict[str, Any],
+    evaluation: dict[str, Any],
+    chart_payload: dict[str, Any] | None = None,
+) -> Path:
     event_type = str(rule.get("event_type", "")).strip().lower()
     params = normalize_event_params_for_compare(event_type, rule.get("params", {}))
 
-    asset_type = str(rule.get("asset_type", "")).strip().lower()
-    period = str(rule.get("period", "")).strip()
-    interval = str(rule.get("interval", "")).strip()
-    symbol = str(rule.get("quote_symbol") or rule.get("symbol") or "").strip()
-    if not symbol:
-        raise RuntimeError("event snapshot missing symbol")
+    if chart_payload is None:
+        ctx = resolve_event_rule_chart_context(rule)
+        chart_payload = fetch_chart_data(ctx["asset_type"], ctx["chart_symbol"], ctx["period"], ctx["interval"])
 
-    chart_payload = fetch_chart_data(asset_type, symbol, period, interval)
+    period = str(chart_payload["period"])
+    interval = str(chart_payload["interval"])
     flags = resolve_snapshot_flags_for_event(event_type)
     indicators = compute_indicators(chart_payload["candles"], flags)
 
@@ -2799,23 +2828,8 @@ def evaluate_event_rule_on_chart(rule: dict[str, Any], chart_payload: dict[str, 
 
 
 def evaluate_event_rule(rule: dict[str, Any]) -> dict[str, Any]:
-    event_type = str(rule.get("event_type", "")).strip().lower()
-    if event_type not in EVENT_TYPE_CHOICES:
-        raise RuntimeError(f"unsupported event type: {event_type}")
-
-    asset_type = str(rule.get("asset_type", "")).strip().lower()
-    if asset_type not in ("crypto", "stock"):
-        raise RuntimeError(f"invalid asset type in rule: {asset_type}")
-
-    period = str(rule.get("period", "")).strip()
-    interval = str(rule.get("interval", "")).strip()
-    period, interval, _ = validate_chart_period_interval(asset_type, period, interval)
-
-    chart_symbol = str(rule.get("quote_symbol") or rule.get("symbol") or "").strip()
-    if not chart_symbol:
-        raise RuntimeError("event rule missing symbol")
-
-    chart_payload = fetch_chart_data(asset_type, chart_symbol, period, interval)
+    ctx = resolve_event_rule_chart_context(rule)
+    chart_payload = fetch_chart_data(ctx["asset_type"], ctx["chart_symbol"], ctx["period"], ctx["interval"])
     return evaluate_event_rule_on_chart(rule, chart_payload)
 
 
@@ -3529,6 +3543,27 @@ def cmd_event_check(args: argparse.Namespace) -> int:
         errors = 0
         results: list[dict[str, Any]] = []
 
+        rule_ctx_by_id: dict[str, dict[str, str]] = {}
+        chart_cache: dict[str, dict[str, Any]] = {}
+        chart_cache_error: dict[str, str] = {}
+
+        # Prefetch chart data once per unique asset+symbol+timeframe key.
+        for rule in rules:
+            if not bool(rule.get("enabled", True)):
+                continue
+            rule_id = str(rule.get("id"))
+            try:
+                ctx = resolve_event_rule_chart_context(rule)
+                rule_ctx_by_id[rule_id] = ctx
+                key = ctx["key"]
+                if key not in chart_cache and key not in chart_cache_error:
+                    try:
+                        chart_cache[key] = fetch_chart_data(ctx["asset_type"], ctx["chart_symbol"], ctx["period"], ctx["interval"])
+                    except Exception as exc:
+                        chart_cache_error[key] = str(exc)
+            except Exception as exc:
+                chart_cache_error[f"rule:{rule_id}"] = str(exc)
+
         for rule in rules:
             if not bool(rule.get("enabled", True)):
                 continue
@@ -3539,7 +3574,17 @@ def cmd_event_check(args: argparse.Namespace) -> int:
             prev_condition = bool(previous.get("last_condition", False))
 
             try:
-                evaluation = evaluate_event_rule(rule)
+                ctx = rule_ctx_by_id.get(rule_id)
+                if ctx is None:
+                    raise RuntimeError(chart_cache_error.get(f"rule:{rule_id}", "rule context missing"))
+                cache_key = ctx["key"]
+                if cache_key in chart_cache_error:
+                    raise RuntimeError(chart_cache_error[cache_key])
+                chart_payload = chart_cache.get(cache_key)
+                if chart_payload is None:
+                    raise RuntimeError("cached chart payload missing")
+
+                evaluation = evaluate_event_rule_on_chart(rule, chart_payload)
                 condition_now = bool(evaluation.get("condition", False))
 
                 dedup_mode = str(rule.get("dedup_mode", "cross_once")).strip().lower()
@@ -3559,7 +3604,7 @@ def cmd_event_check(args: argparse.Namespace) -> int:
                     attach_chart = bool(params.get("attach_chart", False))
                     if attach_chart:
                         try:
-                            snap_path = build_event_snapshot(rule, evaluation)
+                            snap_path = build_event_snapshot(rule, evaluation, chart_payload=chart_payload)
                             snapshot_path = str(snap_path)
                             if rule.get("channel") and rule.get("target"):
                                 delivered = send_media_notification(
