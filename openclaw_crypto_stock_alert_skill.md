@@ -7,6 +7,10 @@
 1. 价格告警模块（quote/add/check/cron）
 2. 图表分析模块（chart/report）
 
+事件提醒扩展的分阶段计划见：
+
+- `docs/EVENT_ALERTS_TODO.md`
+
 ## 已实现能力
 
 ### A. 价格告警

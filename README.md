@@ -28,6 +28,15 @@ Typical requests this skill handles:
 - `SKILL.md` - OpenClaw skill metadata and invocation guidance
 - `scripts/market_alert.py` - Main CLI
 - `openclaw_crypto_stock_alert_skill.md` - Design notes (Chinese)
+- `docs/EVENT_ALERTS_TODO.md` - phased event-reminder implementation backlog
+
+## Roadmap
+
+Event reminder expansion (MACD/RSI/MA/BB/Volume/Fibonacci/divergence) is tracked in:
+
+- `docs/EVENT_ALERTS_TODO.md`
+
+All new event features are implemented in phases, and docs are updated after each phase.
 
 ## Requirements
 

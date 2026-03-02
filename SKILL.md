@@ -144,3 +144,11 @@ Action sequence:
 - Duplicate concurrent `check` runs are lock-protected.
 - Cron environments may have minimal PATH; script auto-resolves `openclaw` binary and supports `OPENCLAW_BIN` override.
 - Chart/report requires `matplotlib`; if missing, use venv install.
+
+## Event Reminder Roadmap
+
+For phased implementation of advanced event reminders (MACD/RSI/MA/BB/Volume/Fibonacci/divergence), track:
+
+- `docs/EVENT_ALERTS_TODO.md`
+
+Update this roadmap and `README.md` after each phase is implemented.
