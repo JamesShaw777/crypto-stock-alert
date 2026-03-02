@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -2833,6 +2834,50 @@ def evaluate_event_rule(rule: dict[str, Any]) -> dict[str, Any]:
     return evaluate_event_rule_on_chart(rule, chart_payload)
 
 
+def build_event_chart_cache(
+    rules: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, Any]], dict[str, str], dict[str, int]]:
+    rule_ctx_by_id: dict[str, dict[str, str]] = {}
+    chart_cache: dict[str, dict[str, Any]] = {}
+    chart_cache_error: dict[str, str] = {}
+
+    enabled_rules = 0
+    reused_rules = 0
+    fetches = 0
+    failures = 0
+
+    for rule in rules:
+        if not bool(rule.get("enabled", True)):
+            continue
+        enabled_rules += 1
+        rule_id = str(rule.get("id"))
+        try:
+            ctx = resolve_event_rule_chart_context(rule)
+            rule_ctx_by_id[rule_id] = ctx
+            key = ctx["key"]
+            if key in chart_cache or key in chart_cache_error:
+                reused_rules += 1
+                continue
+            try:
+                chart_cache[key] = fetch_chart_data(ctx["asset_type"], ctx["chart_symbol"], ctx["period"], ctx["interval"])
+                fetches += 1
+            except Exception as exc:
+                chart_cache_error[key] = str(exc)
+                failures += 1
+        except Exception as exc:
+            chart_cache_error[f"rule:{rule_id}"] = str(exc)
+            failures += 1
+
+    metrics = {
+        "enabled_rules": enabled_rules,
+        "chart_cache_keys": len(chart_cache),
+        "chart_cache_fetches": fetches,
+        "chart_cache_failures": failures,
+        "chart_cache_reused_rules": reused_rules,
+    }
+    return rule_ctx_by_id, chart_cache, chart_cache_error, metrics
+
+
 def can_trigger_with_cooldown(last_triggered_at: str, cooldown_minutes: int) -> bool:
     if cooldown_minutes <= 0:
         return True
@@ -3535,6 +3580,7 @@ def cmd_event_rm(args: argparse.Namespace) -> int:
 def cmd_event_check(args: argparse.Namespace) -> int:
     lock_handle = acquire_event_check_lock()
     try:
+        started = time.perf_counter()
         rules = load_event_rules()
         status = load_event_status()
 
@@ -3542,27 +3588,7 @@ def cmd_event_check(args: argparse.Namespace) -> int:
         checked = 0
         errors = 0
         results: list[dict[str, Any]] = []
-
-        rule_ctx_by_id: dict[str, dict[str, str]] = {}
-        chart_cache: dict[str, dict[str, Any]] = {}
-        chart_cache_error: dict[str, str] = {}
-
-        # Prefetch chart data once per unique asset+symbol+timeframe key.
-        for rule in rules:
-            if not bool(rule.get("enabled", True)):
-                continue
-            rule_id = str(rule.get("id"))
-            try:
-                ctx = resolve_event_rule_chart_context(rule)
-                rule_ctx_by_id[rule_id] = ctx
-                key = ctx["key"]
-                if key not in chart_cache and key not in chart_cache_error:
-                    try:
-                        chart_cache[key] = fetch_chart_data(ctx["asset_type"], ctx["chart_symbol"], ctx["period"], ctx["interval"])
-                    except Exception as exc:
-                        chart_cache_error[key] = str(exc)
-            except Exception as exc:
-                chart_cache_error[f"rule:{rule_id}"] = str(exc)
+        rule_ctx_by_id, chart_cache, chart_cache_error, cache_metrics = build_event_chart_cache(rules)
 
         for rule in rules:
             if not bool(rule.get("enabled", True)):
@@ -3711,11 +3737,22 @@ def cmd_event_check(args: argparse.Namespace) -> int:
             "errors": errors,
             "dry_run": bool(args.dry_run),
             "timestamp": now_iso(),
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+            **cache_metrics,
         }
         if args.json:
             print(json.dumps({"summary": summary, "results": results}, ensure_ascii=False, indent=2))
         elif not args.quiet:
             print(f"SUMMARY   checked={checked} triggered={triggered} errors={errors} dry_run={bool(args.dry_run)}")
+            if args.show_metrics:
+                print(
+                    "METRICS   "
+                    f"duration_ms={summary['duration_ms']} "
+                    f"cache_keys={summary['chart_cache_keys']} "
+                    f"cache_fetches={summary['chart_cache_fetches']} "
+                    f"cache_failures={summary['chart_cache_failures']} "
+                    f"cache_reused_rules={summary['chart_cache_reused_rules']}"
+                )
 
         if errors > 0 and args.fail_on_error:
             return 2
@@ -3729,6 +3766,7 @@ def cmd_event_check(args: argparse.Namespace) -> int:
 
 
 def cmd_event_backtest(args: argparse.Namespace) -> int:
+    started = time.perf_counter()
     rules = load_event_rules()
     rule_id = str(args.rule_id)
     rule = next((r for r in rules if str(r.get("id")) == rule_id), None)
@@ -3786,10 +3824,12 @@ def cmd_event_backtest(args: argparse.Namespace) -> int:
         "symbol": chart_payload["symbol"],
         "timeframe": f"{period}/{interval}",
         "bars_used": len(candles),
+        "evaluated_steps": max(0, len(candles) - 4),
         "trigger_count": len(trigger_points),
         "errors": errors,
         "first_trigger_as_of": trigger_points[0]["as_of"] if trigger_points else "",
         "last_trigger_as_of": trigger_points[-1]["as_of"] if trigger_points else "",
+        "duration_ms": int((time.perf_counter() - started) * 1000),
     }
 
     if args.json:
@@ -3797,7 +3837,8 @@ def cmd_event_backtest(args: argparse.Namespace) -> int:
     else:
         print(
             f"BACKTEST rule={rule_id} event={rule.get('event_type')} symbol={chart_payload['symbol']} "
-            f"tf={period}/{interval} bars={len(candles)} triggers={len(trigger_points)} errors={errors}"
+            f"tf={period}/{interval} bars={len(candles)} steps={summary['evaluated_steps']} "
+            f"triggers={len(trigger_points)} errors={errors} duration_ms={summary['duration_ms']}"
         )
         for row in trigger_points[:20]:
             print(f"TRIGGER  idx={row['index']} as_of={row['as_of']}")
@@ -4080,6 +4121,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_event_check.add_argument("--dry-run", action="store_true")
     p_event_check.add_argument("--quiet", action="store_true")
     p_event_check.add_argument("--json", action="store_true")
+    p_event_check.add_argument("--show-metrics", action="store_true", help="Print cache/duration metrics in text mode")
     p_event_check.add_argument("--fail-on-error", action="store_true")
     p_event_check.set_defaults(func=cmd_event_check)
 

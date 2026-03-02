@@ -295,7 +295,7 @@ python3 scripts/market_alert.py event-rm <RULE_ID>
 ### `event-check`
 
 ```bash
-python3 scripts/market_alert.py event-check [--dry-run] [--quiet] [--json] [--fail-on-error]
+python3 scripts/market_alert.py event-check [--dry-run] [--quiet] [--json] [--show-metrics] [--fail-on-error]
 ```
 
 ### `event-backtest`
@@ -422,6 +422,8 @@ Event reminders follow rule-level dedup/cooldown settings:
 - `event-install-preset`: install preset bundles idempotently
 - `--severity`: tag event message as `info`/`warning`/`critical` (or `auto`)
 - `--attach-chart`: generate and send chart snapshot together with event message
+- Event checks reuse shared chart cache per `asset+symbol+timeframe` key to reduce duplicate API fetches
+- Use `event-check --show-metrics` (text mode) or `event-check --json` to view cache/duration metrics
 
 `event-check` is lock-protected (`event_check.lock`) to avoid duplicate triggers under concurrent execution.
 
