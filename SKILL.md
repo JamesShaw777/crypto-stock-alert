@@ -17,6 +17,8 @@ State files:
 
 - `~/.openclaw/skills-data/crypto-stock-alert/alerts.json`
 - `~/.openclaw/skills-data/crypto-stock-alert/status.json`
+- `~/.openclaw/skills-data/crypto-stock-alert/event_rules.json`
+- `~/.openclaw/skills-data/crypto-stock-alert/event_status.json`
 - `~/.openclaw/skills-data/crypto-stock-alert/check.log`
 - `~/.openclaw/skills-data/crypto-stock-alert/charts/`
 
@@ -63,6 +65,44 @@ python3 {baseDir}/scripts/market_alert.py rm <alert_id>
 ```bash
 python3 {baseDir}/scripts/market_alert.py install-cron --minutes 5
 python3 {baseDir}/scripts/market_alert.py uninstall-cron
+```
+
+## Event Reminder Commands (Phase 1)
+
+Current implemented event types:
+
+- `macd_golden_cross`
+- `macd_dead_cross`
+
+### Add Event Rule
+
+```bash
+# MACD golden cross with user profile 7/10/30 on crypto 15m
+python3 {baseDir}/scripts/market_alert.py event-add \
+  --event-type macd_golden_cross \
+  --type crypto --symbol BTC \
+  --period 5d --interval 15m \
+  --macd-profile user_7_10_30 \
+  --confirm-bars 1 \
+  --cooldown-minutes 30 \
+  --dedup-mode cross_once \
+  --channel telegram --target @your_chat
+
+# MACD dead cross on stock daily
+python3 {baseDir}/scripts/market_alert.py event-add \
+  --event-type macd_dead_cross \
+  --type stock --symbol AAPL \
+  --period 3mo --interval 1d \
+  --macd-profile standard
+```
+
+### Check / List / Remove Event Rules
+
+```bash
+python3 {baseDir}/scripts/market_alert.py event-list
+python3 {baseDir}/scripts/market_alert.py event-check --dry-run
+python3 {baseDir}/scripts/market_alert.py event-check
+python3 {baseDir}/scripts/market_alert.py event-rm <rule_id>
 ```
 
 ## Chart Generation
@@ -137,11 +177,22 @@ Action sequence:
 2. Run and return `CHART_PATH`
 3. If requested, send image via channel/target
 
+When user says:
+
+- "15分钟BTC MACD出现金叉就提醒我，参数用7 10 30"
+
+Action sequence:
+
+1. Add event rule: `event-add --event-type macd_golden_cross --type crypto --symbol BTC --period 5d --interval 15m --macd-profile user_7_10_30`
+2. Run immediate dry-run: `event-check --dry-run`
+3. If recurring monitoring is needed, schedule `event-check` periodically
+
 ## Behavior Notes
 
 - Default mode is `edge`: notify only on false->true crossing.
 - Use `--repeat continuous` to notify every check while condition is true.
 - Duplicate concurrent `check` runs are lock-protected.
+- `event-check` uses separate lock protection to avoid duplicate event triggers.
 - Cron environments may have minimal PATH; script auto-resolves `openclaw` binary and supports `OPENCLAW_BIN` override.
 - Chart/report requires `matplotlib`; if missing, use venv install.
 

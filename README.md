@@ -4,6 +4,7 @@ OpenClaw skill + Python CLI for:
 
 - Crypto and stock price lookup
 - Threshold alerts (`above` / `below`)
+- Event-based reminders (phase 1 foundation)
 - Scheduled checks via cron
 - Chart image generation (candlestick/line)
 - Technical indicators (SMA, EMA, MACD, RSI, Bollinger Bands, Fibonacci)
@@ -20,6 +21,7 @@ Typical requests this skill handles:
 - Multi-source fallback for both quote and chart data
 - Edge-triggered alerts to avoid repeated spam
 - Lock protection for concurrent `check` executions
+- Lock protection for concurrent `event-check` executions
 - PNG chart output with indicator overlays
 - Optional delivery via `openclaw message send --media`
 
@@ -37,6 +39,11 @@ Event reminder expansion (MACD/RSI/MA/BB/Volume/Fibonacci/divergence) is tracked
 - `docs/EVENT_ALERTS_TODO.md`
 
 All new event features are implemented in phases, and docs are updated after each phase.
+
+Currently implemented event types:
+
+- `macd_golden_cross`
+- `macd_dead_cross`
 
 ## Requirements
 
@@ -94,7 +101,35 @@ python3 scripts/market_alert.py install-cron --minutes 5
 python3 scripts/market_alert.py uninstall-cron
 ```
 
-### 5) Generate charts
+### 5) Add event reminder rules (phase 1)
+
+```bash
+# MACD golden cross, crypto 15m, using your requested 7/10/30 profile
+python3 scripts/market_alert.py event-add \
+  --event-type macd_golden_cross \
+  --type crypto --symbol BTC \
+  --period 5d --interval 15m \
+  --macd-profile user_7_10_30 \
+  --confirm-bars 1 \
+  --cooldown-minutes 30
+
+# MACD dead cross, stock daily
+python3 scripts/market_alert.py event-add \
+  --event-type macd_dead_cross \
+  --type stock --symbol AAPL \
+  --period 3mo --interval 1d \
+  --macd-profile standard
+```
+
+### 6) Check/list/remove event rules
+
+```bash
+python3 scripts/market_alert.py event-list
+python3 scripts/market_alert.py event-check --dry-run
+python3 scripts/market_alert.py event-rm <RULE_ID>
+```
+
+### 7) Generate charts
 
 ```bash
 # Stock (all indicators)
@@ -104,7 +139,7 @@ python3 scripts/market_alert.py uninstall-cron
 .venv/bin/python scripts/market_alert.py chart BTC --type crypto --period 5d --interval 15m --all-indicators
 ```
 
-### 6) Generate quick technical report
+### 8) Generate quick technical report
 
 ```bash
 .venv/bin/python scripts/market_alert.py report BTC --type crypto --period 5d --interval 15m
@@ -150,6 +185,40 @@ python3 scripts/market_alert.py rm <ALERT_ID>
 
 ```bash
 python3 scripts/market_alert.py check [--dry-run] [--quiet] [--json] [--fail-on-error]
+```
+
+### `event-add`
+
+```bash
+python3 scripts/market_alert.py event-add \
+  --event-type macd_golden_cross|macd_dead_cross \
+  --type auto|crypto|stock \
+  --symbol <SYMBOL> \
+  [--period PERIOD] [--interval INTERVAL] \
+  [--confirm-bars N] \
+  [--cooldown-minutes N] \
+  [--dedup-mode cross_once|continuous] \
+  [--macd-profile auto|standard|fast_crypto|slow_trend|user_7_10_30|custom] \
+  [--macd-fast N --macd-slow N --macd-signal N] \
+  [--channel CHANNEL --target TARGET] [--note TEXT] [--json]
+```
+
+### `event-list`
+
+```bash
+python3 scripts/market_alert.py event-list [--json]
+```
+
+### `event-rm`
+
+```bash
+python3 scripts/market_alert.py event-rm <RULE_ID>
+```
+
+### `event-check`
+
+```bash
+python3 scripts/market_alert.py event-check [--dry-run] [--quiet] [--json] [--fail-on-error]
 ```
 
 ### `install-cron`
@@ -249,6 +318,14 @@ Alerts are edge-triggered:
 
 `check` is lock-protected (`check.lock`) to avoid duplicate triggers under concurrent execution.
 
+Event reminders follow rule-level dedup/cooldown settings:
+
+- `dedup_mode=cross_once`: trigger on new condition crossing only
+- `dedup_mode=continuous`: trigger while condition remains true (respecting cooldown)
+- `cooldown_minutes`: minimum spacing between repeated event notifications
+
+`event-check` is lock-protected (`event_check.lock`) to avoid duplicate triggers under concurrent execution.
+
 ## State Files
 
 Default directory:
@@ -261,8 +338,11 @@ Files:
 
 - `alerts.json` - alert rules
 - `status.json` - latest condition/check state
+- `event_rules.json` - event reminder rules
+- `event_status.json` - latest event-check state per rule
 - `check.log` - cron check output
 - `check.lock` - runtime lock for `check`
+- `event_check.lock` - runtime lock for `event-check`
 - `charts/` - generated PNG files
 
 Override state directory:
@@ -292,6 +372,16 @@ Execution mapping:
 1. `chart BTC --type crypto --period 5d --interval 15m --macd --fib`
 2. Return `CHART_PATH`
 3. If asked, deliver via `--channel/--target`
+
+Example request:
+
+> "Remind me when BTC MACD gives a golden cross on 15m using 7/10/30."
+
+Execution mapping:
+
+1. `event-add --event-type macd_golden_cross --type crypto --symbol BTC --period 5d --interval 15m --macd-profile user_7_10_30`
+2. `event-check --dry-run`
+3. Schedule periodic checks by running `event-check` via cron or heartbeat workflow
 
 ## Troubleshooting
 

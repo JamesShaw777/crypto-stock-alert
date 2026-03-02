@@ -39,6 +39,9 @@ ALERTS_FILE = STATE_DIR / "alerts.json"
 STATUS_FILE = STATE_DIR / "status.json"
 LOG_FILE = STATE_DIR / "check.log"
 LOCK_FILE = STATE_DIR / "check.lock"
+EVENT_RULES_FILE = STATE_DIR / "event_rules.json"
+EVENT_STATUS_FILE = STATE_DIR / "event_status.json"
+EVENT_LOCK_FILE = STATE_DIR / "event_check.lock"
 CHART_DIR = STATE_DIR / "charts"
 
 CRON_BLOCK_START = "# OPENCLAW_CRYPTO_STOCK_ALERT_START"
@@ -108,6 +111,18 @@ COINGECKO_SYMBOL_TO_ID = {
 
 FIB_RATIOS = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
 
+EVENT_TYPE_CHOICES = (
+    "macd_golden_cross",
+    "macd_dead_cross",
+)
+
+MACD_PROFILES: dict[str, tuple[int, int, int]] = {
+    "standard": (12, 26, 9),
+    "fast_crypto": (8, 21, 5),
+    "slow_trend": (19, 39, 9),
+    "user_7_10_30": (7, 10, 30),
+}
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -118,6 +133,21 @@ def ts_to_iso(ts: Any) -> str:
         return datetime.fromtimestamp(int(ts), tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     except Exception:
         return now_iso()
+
+
+def iso_to_dt(value: str) -> datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
 
 
 def ensure_state_dir() -> None:
@@ -144,15 +174,23 @@ def write_json(path: Path, value: Any) -> None:
     tmp.replace(path)
 
 
-def acquire_check_lock() -> Any:
+def acquire_lock(lock_path: Path, reason: str) -> Any:
     ensure_state_dir()
-    handle = LOCK_FILE.open("w", encoding="utf-8")
+    handle = lock_path.open("w", encoding="utf-8")
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         handle.close()
-        raise RuntimeError("another check process is already running") from exc
+        raise RuntimeError(reason) from exc
     return handle
+
+
+def acquire_check_lock() -> Any:
+    return acquire_lock(LOCK_FILE, "another check process is already running")
+
+
+def acquire_event_check_lock() -> Any:
+    return acquire_lock(EVENT_LOCK_FILE, "another event-check process is already running")
 
 
 def load_alerts() -> list[dict[str, Any]]:
@@ -173,6 +211,26 @@ def load_status() -> dict[str, Any]:
 
 def save_status(conditions: dict[str, Any]) -> None:
     write_json(STATUS_FILE, {"conditions": conditions})
+
+
+def load_event_rules() -> list[dict[str, Any]]:
+    payload = read_json(EVENT_RULES_FILE, {"rules": []})
+    rules = payload.get("rules", []) if isinstance(payload, dict) else []
+    return rules if isinstance(rules, list) else []
+
+
+def save_event_rules(rules: list[dict[str, Any]]) -> None:
+    write_json(EVENT_RULES_FILE, {"rules": rules})
+
+
+def load_event_status() -> dict[str, Any]:
+    payload = read_json(EVENT_STATUS_FILE, {"conditions": {}})
+    conditions = payload.get("conditions", {}) if isinstance(payload, dict) else {}
+    return conditions if isinstance(conditions, dict) else {}
+
+
+def save_event_status(conditions: dict[str, Any]) -> None:
+    write_json(EVENT_STATUS_FILE, {"conditions": conditions})
 
 
 def http_get_json(url: str, headers: dict[str, str] | None = None) -> Any:
@@ -724,23 +782,30 @@ def ema_series(values: list[float], span: int) -> list[float | None]:
     return out
 
 
-def macd_series(closes: list[float]) -> tuple[list[float | None], list[float | None], list[float | None]]:
-    ema12 = ema_series(closes, 12)
-    ema26 = ema_series(closes, 26)
+def macd_series_custom(
+    closes: list[float], fast_span: int = 12, slow_span: int = 26, signal_span: int = 9
+) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    if fast_span <= 0 or slow_span <= 0 or signal_span <= 0:
+        raise ValueError("MACD spans must be positive integers")
+    if fast_span >= slow_span:
+        raise ValueError("MACD fast span must be less than slow span")
+
+    ema_fast = ema_series(closes, fast_span)
+    ema_slow = ema_series(closes, slow_span)
 
     macd_line: list[float | None] = [None] * len(closes)
     macd_compact: list[float] = []
     idx_map: list[int] = []
 
-    for idx, (e12, e26) in enumerate(zip(ema12, ema26)):
-        if e12 is None or e26 is None:
+    for idx, (e_fast, e_slow) in enumerate(zip(ema_fast, ema_slow)):
+        if e_fast is None or e_slow is None:
             continue
-        value = e12 - e26
+        value = e_fast - e_slow
         macd_line[idx] = value
         macd_compact.append(value)
         idx_map.append(idx)
 
-    signal_compact = ema_series(macd_compact, 9)
+    signal_compact = ema_series(macd_compact, signal_span)
     signal_line: list[float | None] = [None] * len(closes)
     hist_line: list[float | None] = [None] * len(closes)
 
@@ -755,6 +820,10 @@ def macd_series(closes: list[float]) -> tuple[list[float | None], list[float | N
         hist_line[real_idx] = macd_value - signal
 
     return macd_line, signal_line, hist_line
+
+
+def macd_series(closes: list[float]) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    return macd_series_custom(closes, 12, 26, 9)
 
 
 def rsi_series(closes: list[float], period: int = 14) -> list[float | None]:
@@ -1384,6 +1453,224 @@ def build_indicator_summary(chart_payload: dict[str, Any], indicators: dict[str,
     return lines
 
 
+# ----------------------- Event helpers -----------------------
+
+def resolve_event_defaults(asset_type: str, period: str, interval: str) -> tuple[str, str]:
+    out_period = period.strip() if period else ""
+    out_interval = interval.strip() if interval else ""
+
+    if asset_type == "stock":
+        if not out_period:
+            out_period = "3mo"
+        if not out_interval:
+            out_interval = "1d"
+    else:
+        if not out_period:
+            out_period = "5d"
+        if not out_interval:
+            out_interval = "15m"
+
+    return out_period, out_interval
+
+
+def normalize_event_symbol(asset_type: str, raw_symbol: str) -> tuple[str, str]:
+    if asset_type == "crypto":
+        base, quote_symbol = normalize_crypto_symbol(raw_symbol)
+        return base, quote_symbol
+    symbol = normalize_stock_symbol(raw_symbol)
+    return symbol, symbol
+
+
+def resolve_macd_profile_params(
+    asset_type: str,
+    macd_profile: str,
+    macd_fast: int | None,
+    macd_slow: int | None,
+    macd_signal: int | None,
+) -> dict[str, Any]:
+    profile = macd_profile.strip().lower() if macd_profile else "auto"
+    if profile == "auto":
+        profile = "fast_crypto" if asset_type == "crypto" else "standard"
+
+    if profile == "custom":
+        if macd_fast is None or macd_slow is None or macd_signal is None:
+            raise ValueError("--macd-fast/--macd-slow/--macd-signal are required when --macd-profile custom")
+        fast, slow, signal = int(macd_fast), int(macd_slow), int(macd_signal)
+    else:
+        tpl = MACD_PROFILES.get(profile)
+        if tpl is None:
+            raise ValueError(f"unknown macd profile: {profile}")
+        fast, slow, signal = tpl
+
+    if fast <= 0 or slow <= 0 or signal <= 0:
+        raise ValueError("MACD spans must be positive integers")
+    if fast >= slow:
+        raise ValueError("MACD fast span must be less than MACD slow span")
+
+    return {
+        "macd_profile": profile,
+        "macd_fast": int(fast),
+        "macd_slow": int(slow),
+        "macd_signal": int(signal),
+    }
+
+
+def extract_macd_params(rule: dict[str, Any]) -> tuple[int, int, int, str]:
+    params = rule.get("params") if isinstance(rule.get("params"), dict) else {}
+    profile = str(params.get("macd_profile", "standard"))
+    try:
+        fast = int(params.get("macd_fast", 12))
+        slow = int(params.get("macd_slow", 26))
+        signal = int(params.get("macd_signal", 9))
+    except Exception as exc:
+        raise RuntimeError("invalid stored MACD params for event rule") from exc
+    if fast <= 0 or slow <= 0 or signal <= 0 or fast >= slow:
+        raise RuntimeError("invalid stored MACD params for event rule")
+    return fast, slow, signal, profile
+
+
+def evaluate_macd_cross_event(
+    event_type: str,
+    macd_line: list[float | None],
+    signal_line: list[float | None],
+    confirm_bars: int,
+) -> tuple[bool, dict[str, Any]]:
+    if confirm_bars < 1:
+        confirm_bars = 1
+    n = len(macd_line)
+    start = n - confirm_bars
+    pre = start - 1
+
+    detail: dict[str, Any] = {
+        "confirm_bars": confirm_bars,
+    }
+
+    if pre < 0:
+        detail["reason"] = "not_enough_bars"
+        return False, detail
+
+    if macd_line[pre] is None or signal_line[pre] is None:
+        detail["reason"] = "insufficient_indicator_history"
+        return False, detail
+
+    for idx in range(start, n):
+        if macd_line[idx] is None or signal_line[idx] is None:
+            detail["reason"] = "insufficient_indicator_history"
+            return False, detail
+
+    pre_macd = float(macd_line[pre])  # type: ignore[arg-type]
+    pre_sig = float(signal_line[pre])  # type: ignore[arg-type]
+    last_macd = float(macd_line[-1])  # type: ignore[arg-type]
+    last_sig = float(signal_line[-1])  # type: ignore[arg-type]
+
+    if event_type == "macd_golden_cross":
+        condition = pre_macd <= pre_sig and all(float(macd_line[idx]) > float(signal_line[idx]) for idx in range(start, n))
+    elif event_type == "macd_dead_cross":
+        condition = pre_macd >= pre_sig and all(float(macd_line[idx]) < float(signal_line[idx]) for idx in range(start, n))
+    else:
+        raise RuntimeError(f"unsupported event type: {event_type}")
+
+    detail.update(
+        {
+            "pre_macd": pre_macd,
+            "pre_signal": pre_sig,
+            "last_macd": last_macd,
+            "last_signal": last_sig,
+            "reason": "ok" if condition else "condition_false",
+        }
+    )
+    return condition, detail
+
+
+def evaluate_event_rule(rule: dict[str, Any]) -> dict[str, Any]:
+    event_type = str(rule.get("event_type", "")).strip().lower()
+    if event_type not in EVENT_TYPE_CHOICES:
+        raise RuntimeError(f"unsupported event type: {event_type}")
+
+    asset_type = str(rule.get("asset_type", "")).strip().lower()
+    if asset_type not in ("crypto", "stock"):
+        raise RuntimeError(f"invalid asset type in rule: {asset_type}")
+
+    period = str(rule.get("period", "")).strip()
+    interval = str(rule.get("interval", "")).strip()
+    period, interval, _ = validate_chart_period_interval(asset_type, period, interval)
+
+    chart_symbol = str(rule.get("quote_symbol") or rule.get("symbol") or "").strip()
+    if not chart_symbol:
+        raise RuntimeError("event rule missing symbol")
+
+    chart_payload = fetch_chart_data(asset_type, chart_symbol, period, interval)
+    candles = chart_payload["candles"]
+    closes = [float(c["close"]) for c in candles]
+
+    confirm_bars = max(1, int(rule.get("confirm_bars", 1)))
+    if event_type in ("macd_golden_cross", "macd_dead_cross"):
+        fast, slow, signal, profile = extract_macd_params(rule)
+        macd_line, signal_line, hist_line = macd_series_custom(closes, fast, slow, signal)
+        condition, detail = evaluate_macd_cross_event(event_type, macd_line, signal_line, confirm_bars)
+        detail["macd_profile"] = profile
+        detail["macd_fast"] = fast
+        detail["macd_slow"] = slow
+        detail["macd_signal"] = signal
+        detail["last_hist"] = last_valid(hist_line)
+    else:
+        raise RuntimeError(f"unsupported event type: {event_type}")
+
+    return {
+        "event_type": event_type,
+        "condition": bool(condition),
+        "chart": {
+            "symbol": chart_payload["symbol"],
+            "period": period,
+            "interval": interval,
+            "source": chart_payload["source"],
+            "as_of": chart_payload["as_of"],
+            "checked_at": chart_payload["checked_at"],
+        },
+        "detail": detail,
+    }
+
+
+def can_trigger_with_cooldown(last_triggered_at: str, cooldown_minutes: int) -> bool:
+    if cooldown_minutes <= 0:
+        return True
+    dt = iso_to_dt(last_triggered_at)
+    if dt is None:
+        return True
+    elapsed = datetime.now(timezone.utc) - dt
+    return elapsed >= timedelta(minutes=cooldown_minutes)
+
+
+def format_event_message(rule: dict[str, Any], evaluation: dict[str, Any]) -> str:
+    event_type = str(rule.get("event_type", ""))
+    chart = evaluation.get("chart", {})
+    detail = evaluation.get("detail", {})
+
+    parts = [
+        f"[EVENT ALERT] {chart.get('symbol', rule.get('symbol'))} {event_type}",
+        f"tf={chart.get('period')}/{chart.get('interval')}",
+        f"source={chart.get('source')}",
+        f"as_of={chart.get('as_of')}",
+        f"id={rule.get('id')}",
+    ]
+
+    if event_type in ("macd_golden_cross", "macd_dead_cross"):
+        lm = detail.get("last_macd")
+        ls = detail.get("last_signal")
+        lh = detail.get("last_hist")
+        profile = detail.get("macd_profile")
+        spans = f"{detail.get('macd_fast')},{detail.get('macd_slow')},{detail.get('macd_signal')}"
+        if isinstance(lm, (int, float)) and isinstance(ls, (int, float)):
+            parts.append(f"macd={float(lm):.6f}")
+            parts.append(f"signal={float(ls):.6f}")
+        if isinstance(lh, (int, float)):
+            parts.append(f"hist={float(lh):.6f}")
+        if profile:
+            parts.append(f"profile={profile}:{spans}")
+        parts.append(f"confirm={detail.get('confirm_bars')}")
+
+    return " ".join(str(p) for p in parts)
+
 # ----------------------- Command handlers -----------------------
 
 def cmd_quote(args: argparse.Namespace) -> int:
@@ -1633,6 +1920,266 @@ def cmd_check(args: argparse.Namespace) -> int:
             pass
 
 
+def cmd_event_add(args: argparse.Namespace) -> int:
+    ensure_state_dir()
+
+    if bool(args.channel) ^ bool(args.target):
+        raise ValueError("--channel and --target must be provided together")
+
+    event_type = str(args.event_type).strip().lower()
+    if event_type not in EVENT_TYPE_CHOICES:
+        raise ValueError(f"--event-type must be one of: {', '.join(EVENT_TYPE_CHOICES)}")
+
+    asset_type = str(args.type).strip().lower()
+    if asset_type == "auto":
+        asset_type = resolve_asset_type(args.symbol)
+    if asset_type not in ("crypto", "stock"):
+        raise ValueError("--type must resolve to crypto or stock")
+
+    period, interval = resolve_event_defaults(asset_type, args.period, args.interval)
+    period, interval, auto_note = validate_chart_period_interval(asset_type, period, interval)
+
+    symbol_for_rule, quote_symbol = normalize_event_symbol(asset_type, args.symbol)
+    confirm_bars = max(1, int(args.confirm_bars))
+    cooldown_minutes = max(0, int(args.cooldown_minutes))
+    dedup_mode = str(args.dedup_mode).strip().lower()
+
+    params: dict[str, Any] = {}
+    if event_type in ("macd_golden_cross", "macd_dead_cross"):
+        params = resolve_macd_profile_params(asset_type, args.macd_profile, args.macd_fast, args.macd_slow, args.macd_signal)
+
+    rules = load_event_rules()
+    for existing in rules:
+        if (
+            bool(existing.get("enabled", True))
+            and str(existing.get("event_type", "")).lower() == event_type
+            and str(existing.get("asset_type", "")).lower() == asset_type
+            and str(existing.get("symbol", "")) == symbol_for_rule
+            and str(existing.get("period", "")) == period
+            and str(existing.get("interval", "")) == interval
+            and int(existing.get("confirm_bars", 1)) == confirm_bars
+            and int(existing.get("cooldown_minutes", 0)) == cooldown_minutes
+            and str(existing.get("dedup_mode", "cross_once")).lower() == dedup_mode
+            and str(existing.get("channel", "")) == str(args.channel or "")
+            and str(existing.get("target", "")) == str(args.target or "")
+            and existing.get("params", {}) == params
+        ):
+            if args.json:
+                print(json.dumps(existing, ensure_ascii=False, indent=2))
+            else:
+                print(f"EXISTS {existing.get('id')} {event_type} {asset_type} {symbol_for_rule} {period}/{interval}")
+            return 0
+
+    rule = {
+        "id": secrets.token_hex(4),
+        "event_type": event_type,
+        "asset_type": asset_type,
+        "symbol": symbol_for_rule,
+        "quote_symbol": quote_symbol,
+        "period": period,
+        "interval": interval,
+        "confirm_bars": confirm_bars,
+        "cooldown_minutes": cooldown_minutes,
+        "dedup_mode": dedup_mode,
+        "params": params,
+        "channel": args.channel or "",
+        "target": args.target or "",
+        "note": args.note or "",
+        "enabled": True,
+        "created_at": now_iso(),
+    }
+    rules.append(rule)
+    save_event_rules(rules)
+
+    if args.json:
+        payload = {"rule": rule, "note": auto_note}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        dest = f"{rule['channel']}:{rule['target']}" if rule["channel"] and rule["target"] else "local-log-only"
+        print(
+            f"EVENT_ADDED {rule['id']} {rule['event_type']} {rule['asset_type']} {rule['symbol']} "
+            f"tf={rule['period']}/{rule['interval']} confirm={rule['confirm_bars']} cooldown={rule['cooldown_minutes']}m "
+            f"dedup={rule['dedup_mode']} -> {dest}"
+        )
+        if auto_note:
+            print(f"NOTE {auto_note}")
+    return 0
+
+
+def cmd_event_list(args: argparse.Namespace) -> int:
+    rules = load_event_rules()
+    if args.json:
+        print(json.dumps({"rules": rules}, ensure_ascii=False, indent=2))
+        return 0
+
+    if not rules:
+        print("No event rules configured.")
+        return 0
+
+    print("ID       EVENT_TYPE            TYPE    SYMBOL     TF               CONF  CD(min)  DEDUP       DESTINATION              ENABLED")
+    for rule in rules:
+        tf = f"{rule.get('period')}/{rule.get('interval')}"
+        dest = f"{rule.get('channel')}:{rule.get('target')}" if rule.get("channel") and rule.get("target") else "local-log-only"
+        print(
+            f"{str(rule.get('id','')):8} {str(rule.get('event_type','')):20} {str(rule.get('asset_type','')):7} "
+            f"{str(rule.get('symbol','')):10} {tf:16} {int(rule.get('confirm_bars',1)):4}  "
+            f"{int(rule.get('cooldown_minutes',0)):7}  {str(rule.get('dedup_mode','cross_once')):10} "
+            f"{dest:24} {str(rule.get('enabled', True))}"
+        )
+    return 0
+
+
+def cmd_event_rm(args: argparse.Namespace) -> int:
+    rules = load_event_rules()
+    kept = [rule for rule in rules if str(rule.get("id")) != args.id]
+    if len(kept) == len(rules):
+        print(f"NOT_FOUND {args.id}")
+        return 1
+    save_event_rules(kept)
+
+    status = load_event_status()
+    if args.id in status:
+        status.pop(args.id, None)
+        save_event_status(status)
+
+    print(f"EVENT_REMOVED {args.id}")
+    return 0
+
+
+def cmd_event_check(args: argparse.Namespace) -> int:
+    lock_handle = acquire_event_check_lock()
+    try:
+        rules = load_event_rules()
+        status = load_event_status()
+
+        triggered = 0
+        checked = 0
+        errors = 0
+        results: list[dict[str, Any]] = []
+
+        for rule in rules:
+            if not bool(rule.get("enabled", True)):
+                continue
+
+            checked += 1
+            rule_id = str(rule.get("id"))
+            previous = status.get(rule_id, {})
+            prev_condition = bool(previous.get("last_condition", False))
+
+            try:
+                evaluation = evaluate_event_rule(rule)
+                condition_now = bool(evaluation.get("condition", False))
+
+                dedup_mode = str(rule.get("dedup_mode", "cross_once")).strip().lower()
+                base_trigger = condition_now and (dedup_mode == "continuous" or not prev_condition)
+                cooldown_minutes = max(0, int(rule.get("cooldown_minutes", 0)))
+                cooldown_ok = can_trigger_with_cooldown(str(previous.get("last_triggered_at", "")), cooldown_minutes)
+                should_notify = base_trigger and cooldown_ok
+
+                message = ""
+                delivered = False
+                if should_notify:
+                    message = format_event_message(rule, evaluation)
+                    delivered = send_notification(rule, message, dry_run=args.dry_run, quiet=args.quiet)
+                    triggered += 1
+
+                chart = evaluation.get("chart", {})
+                detail = evaluation.get("detail", {})
+                status[rule_id] = {
+                    "last_checked_at": chart.get("checked_at", now_iso()),
+                    "last_condition": condition_now,
+                    "last_error": "",
+                    "last_event_source": chart.get("source", ""),
+                    "last_event_as_of": chart.get("as_of", ""),
+                    "last_detail": detail,
+                    "last_triggered_at": now_iso() if should_notify else previous.get("last_triggered_at", ""),
+                    "last_delivery_ok": delivered if should_notify else previous.get("last_delivery_ok"),
+                }
+
+                row = {
+                    "id": rule_id,
+                    "event_type": rule.get("event_type"),
+                    "symbol": chart.get("symbol", rule.get("symbol")),
+                    "timeframe": f"{chart.get('period', rule.get('period'))}/{chart.get('interval', rule.get('interval'))}",
+                    "condition": condition_now,
+                    "triggered": should_notify,
+                    "source": chart.get("source", ""),
+                    "checked_at": chart.get("checked_at", now_iso()),
+                    "error": "",
+                    "detail": detail,
+                }
+                results.append(row)
+
+                if not args.quiet:
+                    if should_notify:
+                        state_txt = "TRIGGERED"
+                    elif condition_now and base_trigger and not cooldown_ok:
+                        state_txt = "COOLDOWN"
+                    elif condition_now:
+                        state_txt = "ARMED"
+                    else:
+                        state_txt = "WAIT"
+                    print(
+                        f"{state_txt:9} id={rule_id} event={rule.get('event_type')} symbol={row['symbol']} "
+                        f"tf={row['timeframe']} source={row['source']}"
+                    )
+                    if should_notify and message:
+                        print(f"MESSAGE   {message}")
+
+            except Exception as exc:
+                errors += 1
+                status[rule_id] = {
+                    "last_checked_at": now_iso(),
+                    "last_condition": previous.get("last_condition", False),
+                    "last_error": str(exc),
+                    "last_event_source": previous.get("last_event_source", ""),
+                    "last_event_as_of": previous.get("last_event_as_of", ""),
+                    "last_detail": previous.get("last_detail", {}),
+                    "last_triggered_at": previous.get("last_triggered_at", ""),
+                    "last_delivery_ok": previous.get("last_delivery_ok"),
+                }
+                results.append(
+                    {
+                        "id": rule_id,
+                        "event_type": rule.get("event_type"),
+                        "symbol": rule.get("symbol"),
+                        "timeframe": f"{rule.get('period')}/{rule.get('interval')}",
+                        "condition": None,
+                        "triggered": False,
+                        "source": "",
+                        "checked_at": now_iso(),
+                        "error": str(exc),
+                        "detail": {},
+                    }
+                )
+                if not args.quiet:
+                    print(f"ERROR     id={rule_id} event={rule.get('event_type')} symbol={rule.get('symbol')} error={exc}")
+
+        save_event_status(status)
+
+        summary = {
+            "checked": checked,
+            "triggered": triggered,
+            "errors": errors,
+            "dry_run": bool(args.dry_run),
+            "timestamp": now_iso(),
+        }
+        if args.json:
+            print(json.dumps({"summary": summary, "results": results}, ensure_ascii=False, indent=2))
+        elif not args.quiet:
+            print(f"SUMMARY   checked={checked} triggered={triggered} errors={errors} dry_run={bool(args.dry_run)}")
+
+        if errors > 0 and args.fail_on_error:
+            return 2
+        return 0
+    finally:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            lock_handle.close()
+        except Exception:
+            pass
+
+
 def cmd_install_cron(args: argparse.Namespace) -> int:
     ensure_state_dir()
     schedule = build_cron_schedule(args.minutes, args.cron)
@@ -1855,6 +2402,40 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("--json", action="store_true")
     p_check.add_argument("--fail-on-error", action="store_true")
     p_check.set_defaults(func=cmd_check)
+
+    p_event_add = sub.add_parser("event-add", help="Add an event reminder rule")
+    p_event_add.add_argument("--event-type", choices=EVENT_TYPE_CHOICES, required=True)
+    p_event_add.add_argument("--type", choices=["auto", "crypto", "stock"], default="auto")
+    p_event_add.add_argument("--symbol", required=True)
+    p_event_add.add_argument("--period", default="", help="Rule timeframe period")
+    p_event_add.add_argument("--interval", default="", help="Rule timeframe interval")
+    p_event_add.add_argument("--confirm-bars", type=int, default=1, help="Require signal confirmation over N bars")
+    p_event_add.add_argument("--cooldown-minutes", type=int, default=60, help="Minimum minutes between triggers")
+    p_event_add.add_argument("--dedup-mode", choices=["cross_once", "continuous"], default="cross_once")
+    p_event_add.add_argument("--macd-profile", choices=["auto", "standard", "fast_crypto", "slow_trend", "user_7_10_30", "custom"], default="auto")
+    p_event_add.add_argument("--macd-fast", type=int, default=None)
+    p_event_add.add_argument("--macd-slow", type=int, default=None)
+    p_event_add.add_argument("--macd-signal", type=int, default=None)
+    p_event_add.add_argument("--channel", default="", help="message channel, e.g. telegram")
+    p_event_add.add_argument("--target", default="", help="channel target, e.g. @name or chat id")
+    p_event_add.add_argument("--note", default="")
+    p_event_add.add_argument("--json", action="store_true")
+    p_event_add.set_defaults(func=cmd_event_add)
+
+    p_event_list = sub.add_parser("event-list", help="List event reminder rules")
+    p_event_list.add_argument("--json", action="store_true")
+    p_event_list.set_defaults(func=cmd_event_list)
+
+    p_event_rm = sub.add_parser("event-rm", help="Remove an event rule by id")
+    p_event_rm.add_argument("id")
+    p_event_rm.set_defaults(func=cmd_event_rm)
+
+    p_event_check = sub.add_parser("event-check", help="Evaluate event rules and send notifications")
+    p_event_check.add_argument("--dry-run", action="store_true")
+    p_event_check.add_argument("--quiet", action="store_true")
+    p_event_check.add_argument("--json", action="store_true")
+    p_event_check.add_argument("--fail-on-error", action="store_true")
+    p_event_check.set_defaults(func=cmd_event_check)
 
     p_install = sub.add_parser("install-cron", help="Install managed crontab entry")
     p_install.add_argument("--minutes", type=int, default=5, help="check interval in minutes (1..59)")

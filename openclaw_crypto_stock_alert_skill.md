@@ -6,6 +6,7 @@
 
 1. 价格告警模块（quote/add/check/cron）
 2. 图表分析模块（chart/report）
+3. 事件提醒模块（event-add/event-list/event-rm/event-check，Phase 1）
 
 事件提醒扩展的分阶段计划见：
 
@@ -33,6 +34,21 @@
   - Volume MA20
   - Fibonacci 回撤
 - `report` 命令输出图 + 指标摘要
+
+### C. 事件提醒（Phase 1）
+
+- 独立事件规则存储：`event_rules.json`
+- 独立事件状态存储：`event_status.json`
+- 独立锁防并发：`event_check.lock`
+- 当前支持事件：
+  - `macd_golden_cross`
+  - `macd_dead_cross`
+- 支持 MACD 参数预设：
+  - `standard`
+  - `fast_crypto`
+  - `slow_trend`
+  - `user_7_10_30`
+  - `custom`
 
 ## 你确认的约束已落地
 
@@ -79,6 +95,11 @@ python3 scripts/market_alert.py install-cron --minutes 5
 
 # 一键报告
 .venv/bin/python scripts/market_alert.py report BTC --type crypto --period 5d --interval 15m
+
+# 事件规则：BTC 15m MACD 金叉（7/10/30）
+python3 scripts/market_alert.py event-add --event-type macd_golden_cross --type crypto --symbol BTC --period 5d --interval 15m --macd-profile user_7_10_30
+python3 scripts/market_alert.py event-check --dry-run
+python3 scripts/market_alert.py event-list
 ```
 
 ## 依赖说明

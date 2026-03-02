@@ -27,48 +27,48 @@ Implement reliable, configurable event reminders beyond simple price-threshold a
 
 ### Phase 1: Rule Model + Runtime Framework
 
-Status: `pending`
+Status: `completed`
 
-- [ ] Add persistent rule store for event rules (separate from threshold alert rules)
-- [ ] Add event runtime state store (last condition / last trigger / cooldown state)
-- [ ] Add common rule fields:
-  - [ ] `event_type`
-  - [ ] `asset_type`
-  - [ ] `symbol`
-  - [ ] `period`
-  - [ ] `interval`
-  - [ ] `confirm_bars`
-  - [ ] `cooldown_minutes`
-  - [ ] `dedup_mode`
-  - [ ] `channel` / `target`
-- [ ] Add lock-safe event check flow (same safety level as existing `check`)
-- [ ] Add baseline commands:
-  - [ ] `event-add`
-  - [ ] `event-list`
-  - [ ] `event-rm`
-  - [ ] `event-check`
+- [x] Add persistent rule store for event rules (separate from threshold alert rules)
+- [x] Add event runtime state store (last condition / last trigger / cooldown state)
+- [x] Add common rule fields:
+  - [x] `event_type`
+  - [x] `asset_type`
+  - [x] `symbol`
+  - [x] `period`
+  - [x] `interval`
+  - [x] `confirm_bars`
+  - [x] `cooldown_minutes`
+  - [x] `dedup_mode`
+  - [x] `channel` / `target`
+- [x] Add lock-safe event check flow (same safety level as existing `check`)
+- [x] Add baseline commands:
+  - [x] `event-add`
+  - [x] `event-list`
+  - [x] `event-rm`
+  - [x] `event-check`
 
 Acceptance Criteria:
 
-- [ ] Create/list/remove/check event rules works without impacting existing alert commands
-- [ ] Event rule state survives process restart
-- [ ] No duplicate triggers under concurrent checks
+- [x] Create/list/remove/check event rules works without impacting existing alert commands
+- [x] Event rule state survives process restart
+- [x] No duplicate triggers under concurrent checks
 
 ## Indicator Event Phases
 
 ### Phase 2: MACD Events + MACD Parameter Presets
 
-Status: `pending`
+Status: `in_progress`
 
-- [ ] Add MACD parameter profiles:
-  - [ ] `macd_standard` (12,26,9)
-  - [ ] `macd_fast_crypto` (8,21,5)
-  - [ ] `macd_slow_trend` (19,39,9)
-  - [ ] `macd_user_7_10_30` (7,10,30)
-  - [ ] `macd_custom` (user-defined)
-- [ ] Add MACD events:
-  - [ ] `macd_golden_cross`
-  - [ ] `macd_dead_cross`
+- [x] Add MACD parameter profiles:
+  - [x] `macd_standard` (12,26,9)
+  - [x] `macd_fast_crypto` (8,21,5)
+  - [x] `macd_slow_trend` (19,39,9)
+  - [x] `macd_user_7_10_30` (7,10,30)
+  - [x] `macd_custom` (user-defined)
+- [x] Add MACD events:
+  - [x] `macd_golden_cross`
+  - [x] `macd_dead_cross`
   - [ ] `macd_golden_cross_above_zero`
   - [ ] `macd_dead_cross_below_zero`
   - [ ] `macd_zero_cross_up`
@@ -234,12 +234,13 @@ Acceptance Criteria:
 
 ## Current Priority Queue
 
-1. Phase 1 (event rule model + commands)
-2. Phase 2 (MACD events + parameter presets including `7,10,30`)
-3. Phase 3 (RSI/MA/BB/Volume)
-4. Phase 5 (divergence)
-5. Phase 4 and 6/7 (breakout/fib bundles + delivery polish)
+1. Phase 2 remaining MACD events (`above/below zero`, `zero cross`, `hist` families)
+2. Phase 3 (RSI/MA/BB/Volume)
+3. Phase 5 (divergence)
+4. Phase 4 and 6/7 (breakout/fib bundles + delivery polish)
 
 ## Change Log (Implementation Progress)
 
 - 2026-03-02: Created phased TODO and implementation checklist.
+- 2026-03-02: Completed Phase 1 event-rule foundation (`event-add/list/rm/check`, dedicated stores, lock-safe runtime).
+- 2026-03-02: Started Phase 2 with MACD profiles + `macd_golden_cross` and `macd_dead_cross`.
