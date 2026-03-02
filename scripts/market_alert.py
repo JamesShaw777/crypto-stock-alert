@@ -114,7 +114,16 @@ FIB_RATIOS = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
 EVENT_TYPE_CHOICES = (
     "macd_golden_cross",
     "macd_dead_cross",
+    "macd_golden_cross_above_zero",
+    "macd_dead_cross_below_zero",
+    "macd_zero_cross_up",
+    "macd_zero_cross_down",
+    "macd_hist_turn_positive",
+    "macd_hist_turn_negative",
+    "macd_hist_expand_up_n",
+    "macd_hist_expand_down_n",
 )
+MACD_HIST_EXPAND_EVENT_TYPES = ("macd_hist_expand_up_n", "macd_hist_expand_down_n")
 
 MACD_PROFILES: dict[str, tuple[int, int, int]] = {
     "standard": (12, 26, 9),
@@ -1533,7 +1542,9 @@ def evaluate_macd_cross_event(
     event_type: str,
     macd_line: list[float | None],
     signal_line: list[float | None],
+    hist_line: list[float | None],
     confirm_bars: int,
+    hist_expand_bars: int,
 ) -> tuple[bool, dict[str, Any]]:
     if confirm_bars < 1:
         confirm_bars = 1
@@ -1549,24 +1560,74 @@ def evaluate_macd_cross_event(
         detail["reason"] = "not_enough_bars"
         return False, detail
 
-    if macd_line[pre] is None or signal_line[pre] is None:
+    if macd_line[pre] is None or signal_line[pre] is None or hist_line[pre] is None:
         detail["reason"] = "insufficient_indicator_history"
         return False, detail
 
+    cur_macd: list[float] = []
+    cur_sig: list[float] = []
+    cur_hist: list[float] = []
     for idx in range(start, n):
-        if macd_line[idx] is None or signal_line[idx] is None:
+        mv = macd_line[idx]
+        sv = signal_line[idx]
+        hv = hist_line[idx]
+        if mv is None or sv is None or hv is None:
             detail["reason"] = "insufficient_indicator_history"
             return False, detail
+        cur_macd.append(float(mv))
+        cur_sig.append(float(sv))
+        cur_hist.append(float(hv))
 
     pre_macd = float(macd_line[pre])  # type: ignore[arg-type]
     pre_sig = float(signal_line[pre])  # type: ignore[arg-type]
-    last_macd = float(macd_line[-1])  # type: ignore[arg-type]
-    last_sig = float(signal_line[-1])  # type: ignore[arg-type]
+    pre_hist = float(hist_line[pre])  # type: ignore[arg-type]
+    last_macd = cur_macd[-1]
+    last_sig = cur_sig[-1]
+    last_hist = cur_hist[-1]
 
     if event_type == "macd_golden_cross":
-        condition = pre_macd <= pre_sig and all(float(macd_line[idx]) > float(signal_line[idx]) for idx in range(start, n))
+        condition = pre_macd <= pre_sig and all(cur_macd[idx] > cur_sig[idx] for idx in range(len(cur_macd)))
     elif event_type == "macd_dead_cross":
-        condition = pre_macd >= pre_sig and all(float(macd_line[idx]) < float(signal_line[idx]) for idx in range(start, n))
+        condition = pre_macd >= pre_sig and all(cur_macd[idx] < cur_sig[idx] for idx in range(len(cur_macd)))
+    elif event_type == "macd_golden_cross_above_zero":
+        condition = (
+            pre_macd <= pre_sig
+            and all(cur_macd[idx] > cur_sig[idx] for idx in range(len(cur_macd)))
+            and all(cur_macd[idx] > 0 and cur_sig[idx] > 0 for idx in range(len(cur_macd)))
+        )
+    elif event_type == "macd_dead_cross_below_zero":
+        condition = (
+            pre_macd >= pre_sig
+            and all(cur_macd[idx] < cur_sig[idx] for idx in range(len(cur_macd)))
+            and all(cur_macd[idx] < 0 and cur_sig[idx] < 0 for idx in range(len(cur_macd)))
+        )
+    elif event_type == "macd_zero_cross_up":
+        condition = pre_macd <= 0 and all(value > 0 for value in cur_macd)
+    elif event_type == "macd_zero_cross_down":
+        condition = pre_macd >= 0 and all(value < 0 for value in cur_macd)
+    elif event_type == "macd_hist_turn_positive":
+        condition = pre_hist <= 0 and all(value > 0 for value in cur_hist)
+    elif event_type == "macd_hist_turn_negative":
+        condition = pre_hist >= 0 and all(value < 0 for value in cur_hist)
+    elif event_type in ("macd_hist_expand_up_n", "macd_hist_expand_down_n"):
+        hist_expand_bars = max(2, int(hist_expand_bars))
+        if n < hist_expand_bars:
+            detail["reason"] = "not_enough_hist_bars"
+            detail["hist_expand_bars"] = hist_expand_bars
+            return False, detail
+        win: list[float] = []
+        for idx in range(n - hist_expand_bars, n):
+            hv = hist_line[idx]
+            if hv is None:
+                detail["reason"] = "insufficient_indicator_history"
+                return False, detail
+            win.append(float(hv))
+        if event_type == "macd_hist_expand_up_n":
+            condition = all(value > 0 for value in win) and all(win[idx] > win[idx - 1] for idx in range(1, len(win)))
+        else:
+            condition = all(value < 0 for value in win) and all(win[idx] < win[idx - 1] for idx in range(1, len(win)))
+        detail["hist_expand_bars"] = hist_expand_bars
+        detail["hist_window"] = win
     else:
         raise RuntimeError(f"unsupported event type: {event_type}")
 
@@ -1574,8 +1635,10 @@ def evaluate_macd_cross_event(
         {
             "pre_macd": pre_macd,
             "pre_signal": pre_sig,
+            "pre_hist": pre_hist,
             "last_macd": last_macd,
             "last_signal": last_sig,
+            "last_hist": last_hist,
             "reason": "ok" if condition else "condition_false",
         }
     )
@@ -1604,15 +1667,24 @@ def evaluate_event_rule(rule: dict[str, Any]) -> dict[str, Any]:
     closes = [float(c["close"]) for c in candles]
 
     confirm_bars = max(1, int(rule.get("confirm_bars", 1)))
-    if event_type in ("macd_golden_cross", "macd_dead_cross"):
+    if event_type.startswith("macd_"):
         fast, slow, signal, profile = extract_macd_params(rule)
         macd_line, signal_line, hist_line = macd_series_custom(closes, fast, slow, signal)
-        condition, detail = evaluate_macd_cross_event(event_type, macd_line, signal_line, confirm_bars)
+        params = rule.get("params") if isinstance(rule.get("params"), dict) else {}
+        hist_expand_bars = int(params.get("hist_expand_bars", 3))
+        condition, detail = evaluate_macd_cross_event(
+            event_type,
+            macd_line,
+            signal_line,
+            hist_line,
+            confirm_bars,
+            hist_expand_bars,
+        )
         detail["macd_profile"] = profile
         detail["macd_fast"] = fast
         detail["macd_slow"] = slow
         detail["macd_signal"] = signal
-        detail["last_hist"] = last_valid(hist_line)
+        detail["hist_expand_bars"] = max(2, hist_expand_bars)
     else:
         raise RuntimeError(f"unsupported event type: {event_type}")
 
@@ -1654,20 +1726,38 @@ def format_event_message(rule: dict[str, Any], evaluation: dict[str, Any]) -> st
         f"id={rule.get('id')}",
     ]
 
-    if event_type in ("macd_golden_cross", "macd_dead_cross"):
-        lm = detail.get("last_macd")
-        ls = detail.get("last_signal")
-        lh = detail.get("last_hist")
+    def append_float(name: str, value: Any) -> None:
+        if isinstance(value, (int, float)):
+            parts.append(f"{name}={float(value):.6f}")
+
+    if event_type.startswith("macd_"):
         profile = detail.get("macd_profile")
-        spans = f"{detail.get('macd_fast')},{detail.get('macd_slow')},{detail.get('macd_signal')}"
-        if isinstance(lm, (int, float)) and isinstance(ls, (int, float)):
-            parts.append(f"macd={float(lm):.6f}")
-            parts.append(f"signal={float(ls):.6f}")
-        if isinstance(lh, (int, float)):
-            parts.append(f"hist={float(lh):.6f}")
-        if profile:
-            parts.append(f"profile={profile}:{spans}")
+        fast = detail.get("macd_fast")
+        slow = detail.get("macd_slow")
+        signal = detail.get("macd_signal")
+        if profile and isinstance(fast, int) and isinstance(slow, int) and isinstance(signal, int):
+            parts.append(f"profile={profile}:{fast},{slow},{signal}")
+        elif profile:
+            parts.append(f"profile={profile}")
+
         parts.append(f"confirm={detail.get('confirm_bars')}")
+
+        append_float("pre_macd", detail.get("pre_macd"))
+        append_float("pre_signal", detail.get("pre_signal"))
+        append_float("pre_hist", detail.get("pre_hist"))
+        append_float("macd", detail.get("last_macd"))
+        append_float("signal", detail.get("last_signal"))
+        append_float("hist", detail.get("last_hist"))
+
+        if event_type in MACD_HIST_EXPAND_EVENT_TYPES:
+            hist_expand_bars = detail.get("hist_expand_bars")
+            if isinstance(hist_expand_bars, int):
+                parts.append(f"hist_expand_bars={hist_expand_bars}")
+            hist_window = detail.get("hist_window")
+            if isinstance(hist_window, list) and hist_window:
+                serialized = [f"{float(v):.6f}" for v in hist_window if isinstance(v, (int, float))]
+                if len(serialized) == len(hist_window):
+                    parts.append(f"hist_window={','.join(serialized)}")
 
     return " ".join(str(p) for p in parts)
 
@@ -1945,11 +2035,38 @@ def cmd_event_add(args: argparse.Namespace) -> int:
     dedup_mode = str(args.dedup_mode).strip().lower()
 
     params: dict[str, Any] = {}
-    if event_type in ("macd_golden_cross", "macd_dead_cross"):
+    if event_type.startswith("macd_"):
         params = resolve_macd_profile_params(asset_type, args.macd_profile, args.macd_fast, args.macd_slow, args.macd_signal)
+        if event_type in MACD_HIST_EXPAND_EVENT_TYPES:
+            params["hist_expand_bars"] = max(2, int(args.hist_expand_bars))
+
+    def comparable_event_params(raw_params: Any) -> dict[str, Any]:
+        if not isinstance(raw_params, dict):
+            raw_params = {}
+        if not event_type.startswith("macd_"):
+            return dict(raw_params)
+        try:
+            fast, slow, signal, profile = extract_macd_params({"params": raw_params})
+            normalized: dict[str, Any] = {
+                "macd_profile": profile,
+                "macd_fast": fast,
+                "macd_slow": slow,
+                "macd_signal": signal,
+            }
+        except Exception:
+            normalized = dict(raw_params)
+        if event_type in MACD_HIST_EXPAND_EVENT_TYPES:
+            try:
+                normalized["hist_expand_bars"] = max(2, int(raw_params.get("hist_expand_bars", 3)))
+            except Exception:
+                normalized["hist_expand_bars"] = 3
+        return normalized
+
+    params_for_compare = comparable_event_params(params)
 
     rules = load_event_rules()
     for existing in rules:
+        existing_params_for_compare = comparable_event_params(existing.get("params", {}))
         if (
             bool(existing.get("enabled", True))
             and str(existing.get("event_type", "")).lower() == event_type
@@ -1962,7 +2079,7 @@ def cmd_event_add(args: argparse.Namespace) -> int:
             and str(existing.get("dedup_mode", "cross_once")).lower() == dedup_mode
             and str(existing.get("channel", "")) == str(args.channel or "")
             and str(existing.get("target", "")) == str(args.target or "")
-            and existing.get("params", {}) == params
+            and existing_params_for_compare == params_for_compare
         ):
             if args.json:
                 print(json.dumps(existing, ensure_ascii=False, indent=2))
@@ -2410,6 +2527,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_event_add.add_argument("--period", default="", help="Rule timeframe period")
     p_event_add.add_argument("--interval", default="", help="Rule timeframe interval")
     p_event_add.add_argument("--confirm-bars", type=int, default=1, help="Require signal confirmation over N bars")
+    p_event_add.add_argument("--hist-expand-bars", type=int, default=3, help="Bars used by MACD histogram expansion events (>=2)")
     p_event_add.add_argument("--cooldown-minutes", type=int, default=60, help="Minimum minutes between triggers")
     p_event_add.add_argument("--dedup-mode", choices=["cross_once", "continuous"], default="cross_once")
     p_event_add.add_argument("--macd-profile", choices=["auto", "standard", "fast_crypto", "slow_trend", "user_7_10_30", "custom"], default="auto")

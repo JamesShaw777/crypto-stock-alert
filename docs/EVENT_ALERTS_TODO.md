@@ -58,7 +58,7 @@ Acceptance Criteria:
 
 ### Phase 2: MACD Events + MACD Parameter Presets
 
-Status: `in_progress`
+Status: `completed`
 
 - [x] Add MACD parameter profiles:
   - [x] `macd_standard` (12,26,9)
@@ -69,19 +69,19 @@ Status: `in_progress`
 - [x] Add MACD events:
   - [x] `macd_golden_cross`
   - [x] `macd_dead_cross`
-  - [ ] `macd_golden_cross_above_zero`
-  - [ ] `macd_dead_cross_below_zero`
-  - [ ] `macd_zero_cross_up`
-  - [ ] `macd_zero_cross_down`
-  - [ ] `macd_hist_turn_positive`
-  - [ ] `macd_hist_turn_negative`
-  - [ ] `macd_hist_expand_up_n`
-  - [ ] `macd_hist_expand_down_n`
+  - [x] `macd_golden_cross_above_zero`
+  - [x] `macd_dead_cross_below_zero`
+  - [x] `macd_zero_cross_up`
+  - [x] `macd_zero_cross_down`
+  - [x] `macd_hist_turn_positive`
+  - [x] `macd_hist_turn_negative`
+  - [x] `macd_hist_expand_up_n`
+  - [x] `macd_hist_expand_down_n`
 
 Acceptance Criteria:
 
 - [ ] Events can be backtested on historical candles deterministically
-- [ ] Live check outputs include event context and indicator values
+- [x] Live check outputs include event context and indicator values
 
 ### Phase 3: RSI + MA + Bollinger + Volume Events
 
@@ -234,13 +234,15 @@ Acceptance Criteria:
 
 ## Current Priority Queue
 
-1. Phase 2 remaining MACD events (`above/below zero`, `zero cross`, `hist` families)
-2. Phase 3 (RSI/MA/BB/Volume)
-3. Phase 5 (divergence)
-4. Phase 4 and 6/7 (breakout/fib bundles + delivery polish)
+1. Phase 3 (RSI/MA/BB/Volume)
+2. Phase 5 (divergence)
+3. Phase 4 and 6/7 (breakout/fib bundles + delivery polish)
+4. Phase 2 backtest command support (historical deterministic replay)
 
 ## Change Log (Implementation Progress)
 
 - 2026-03-02: Created phased TODO and implementation checklist.
 - 2026-03-02: Completed Phase 1 event-rule foundation (`event-add/list/rm/check`, dedicated stores, lock-safe runtime).
 - 2026-03-02: Started Phase 2 with MACD profiles + `macd_golden_cross` and `macd_dead_cross`.
+- 2026-03-02: Completed remaining Phase 2 MACD events (`above/below zero`, `zero cross`, `hist turn`, `hist expand`).
+- 2026-03-02: Added `--hist-expand-bars` and richer MACD event messages with indicator context.

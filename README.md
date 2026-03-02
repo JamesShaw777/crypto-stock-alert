@@ -4,7 +4,7 @@ OpenClaw skill + Python CLI for:
 
 - Crypto and stock price lookup
 - Threshold alerts (`above` / `below`)
-- Event-based reminders (phase 1 foundation)
+- Event-based reminders (Phase 2 MACD set)
 - Scheduled checks via cron
 - Chart image generation (candlestick/line)
 - Technical indicators (SMA, EMA, MACD, RSI, Bollinger Bands, Fibonacci)
@@ -40,10 +40,18 @@ Event reminder expansion (MACD/RSI/MA/BB/Volume/Fibonacci/divergence) is tracked
 
 All new event features are implemented in phases, and docs are updated after each phase.
 
-Currently implemented event types:
+Currently implemented event types (Phase 2):
 
 - `macd_golden_cross`
 - `macd_dead_cross`
+- `macd_golden_cross_above_zero`
+- `macd_dead_cross_below_zero`
+- `macd_zero_cross_up`
+- `macd_zero_cross_down`
+- `macd_hist_turn_positive`
+- `macd_hist_turn_negative`
+- `macd_hist_expand_up_n`
+- `macd_hist_expand_down_n`
 
 ## Requirements
 
@@ -101,7 +109,7 @@ python3 scripts/market_alert.py install-cron --minutes 5
 python3 scripts/market_alert.py uninstall-cron
 ```
 
-### 5) Add event reminder rules (phase 1)
+### 5) Add event reminder rules (Phase 2 MACD)
 
 ```bash
 # MACD golden cross, crypto 15m, using your requested 7/10/30 profile
@@ -119,6 +127,14 @@ python3 scripts/market_alert.py event-add \
   --type stock --symbol AAPL \
   --period 3mo --interval 1d \
   --macd-profile standard
+
+# MACD histogram expanding up for N bars (crypto 15m)
+python3 scripts/market_alert.py event-add \
+  --event-type macd_hist_expand_up_n \
+  --type crypto --symbol BTC \
+  --period 5d --interval 15m \
+  --macd-profile user_7_10_30 \
+  --hist-expand-bars 4
 ```
 
 ### 6) Check/list/remove event rules
@@ -191,17 +207,31 @@ python3 scripts/market_alert.py check [--dry-run] [--quiet] [--json] [--fail-on-
 
 ```bash
 python3 scripts/market_alert.py event-add \
-  --event-type macd_golden_cross|macd_dead_cross \
+  --event-type <MACD_EVENT_TYPE> \
   --type auto|crypto|stock \
   --symbol <SYMBOL> \
   [--period PERIOD] [--interval INTERVAL] \
   [--confirm-bars N] \
+  [--hist-expand-bars N] \
   [--cooldown-minutes N] \
   [--dedup-mode cross_once|continuous] \
   [--macd-profile auto|standard|fast_crypto|slow_trend|user_7_10_30|custom] \
   [--macd-fast N --macd-slow N --macd-signal N] \
   [--channel CHANNEL --target TARGET] [--note TEXT] [--json]
 ```
+
+`<MACD_EVENT_TYPE>` choices:
+
+- `macd_golden_cross`
+- `macd_dead_cross`
+- `macd_golden_cross_above_zero`
+- `macd_dead_cross_below_zero`
+- `macd_zero_cross_up`
+- `macd_zero_cross_down`
+- `macd_hist_turn_positive`
+- `macd_hist_turn_negative`
+- `macd_hist_expand_up_n`
+- `macd_hist_expand_down_n`
 
 ### `event-list`
 

@@ -67,12 +67,20 @@ python3 {baseDir}/scripts/market_alert.py install-cron --minutes 5
 python3 {baseDir}/scripts/market_alert.py uninstall-cron
 ```
 
-## Event Reminder Commands (Phase 1)
+## Event Reminder Commands (Phase 2 MACD)
 
 Current implemented event types:
 
 - `macd_golden_cross`
 - `macd_dead_cross`
+- `macd_golden_cross_above_zero`
+- `macd_dead_cross_below_zero`
+- `macd_zero_cross_up`
+- `macd_zero_cross_down`
+- `macd_hist_turn_positive`
+- `macd_hist_turn_negative`
+- `macd_hist_expand_up_n`
+- `macd_hist_expand_down_n`
 
 ### Add Event Rule
 
@@ -94,6 +102,14 @@ python3 {baseDir}/scripts/market_alert.py event-add \
   --type stock --symbol AAPL \
   --period 3mo --interval 1d \
   --macd-profile standard
+
+# MACD histogram expansion up for 4 bars on crypto 15m
+python3 {baseDir}/scripts/market_alert.py event-add \
+  --event-type macd_hist_expand_up_n \
+  --type crypto --symbol BTC \
+  --period 5d --interval 15m \
+  --macd-profile user_7_10_30 \
+  --hist-expand-bars 4
 ```
 
 ### Check / List / Remove Event Rules

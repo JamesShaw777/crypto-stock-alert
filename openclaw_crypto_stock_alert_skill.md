@@ -6,7 +6,7 @@
 
 1. 价格告警模块（quote/add/check/cron）
 2. 图表分析模块（chart/report）
-3. 事件提醒模块（event-add/event-list/event-rm/event-check，Phase 1）
+3. 事件提醒模块（event-add/event-list/event-rm/event-check，Phase 2 MACD）
 
 事件提醒扩展的分阶段计划见：
 
@@ -35,7 +35,7 @@
   - Fibonacci 回撤
 - `report` 命令输出图 + 指标摘要
 
-### C. 事件提醒（Phase 1）
+### C. 事件提醒（Phase 2 MACD）
 
 - 独立事件规则存储：`event_rules.json`
 - 独立事件状态存储：`event_status.json`
@@ -43,6 +43,15 @@
 - 当前支持事件：
   - `macd_golden_cross`
   - `macd_dead_cross`
+  - `macd_golden_cross_above_zero`
+  - `macd_dead_cross_below_zero`
+  - `macd_zero_cross_up`
+  - `macd_zero_cross_down`
+  - `macd_hist_turn_positive`
+  - `macd_hist_turn_negative`
+  - `macd_hist_expand_up_n`
+  - `macd_hist_expand_down_n`
+- `macd_hist_expand_*` 事件支持 `--hist-expand-bars` 参数
 - 支持 MACD 参数预设：
   - `standard`
   - `fast_crypto`
@@ -98,6 +107,10 @@ python3 scripts/market_alert.py install-cron --minutes 5
 
 # 事件规则：BTC 15m MACD 金叉（7/10/30）
 python3 scripts/market_alert.py event-add --event-type macd_golden_cross --type crypto --symbol BTC --period 5d --interval 15m --macd-profile user_7_10_30
+
+# 事件规则：BTC 15m MACD 柱体连续放大 4 根
+python3 scripts/market_alert.py event-add --event-type macd_hist_expand_up_n --type crypto --symbol BTC --period 5d --interval 15m --macd-profile user_7_10_30 --hist-expand-bars 4
+
 python3 scripts/market_alert.py event-check --dry-run
 python3 scripts/market_alert.py event-list
 ```
